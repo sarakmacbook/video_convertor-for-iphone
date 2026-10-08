@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Your secrets and local settings (the bot token lives here)
+.env
+
+# Leftovers from runs
+convert-*/
+*.log
