@@ -15,6 +15,45 @@ The reply shows the before and after sizes. If re-encoding would not make a file
 
 ---
 
+## Web UI, API and Vercel
+
+The same converter also runs as a web app: drop a video in the browser, watch the progress, get
+the smaller file back — or send videos to a Telegram bot whose webhook is served by the same
+deployment. Deploy it on Vercel with **your** database and **your** storage, or run everything
+in Docker on one machine.
+
+- **Web UI** — drag & drop upload with a real progress bar, job history, and a settings page for
+  everything that should not need a redeploy.
+- **Database, your choice** — PostgreSQL (Neon, Vercel Postgres, Supabase, RDS), MySQL
+  (PlanetScale, Aiven), Turso/libSQL, or a SQLite file in Docker. One connection string switches
+  between them; the schema is created automatically.
+- **Storage, your choice** — Vercel Blob, or any S3-compatible bucket (AWS, Cloudflare R2,
+  Supabase Storage, MinIO). The browser uploads straight to storage with a signed URL, so the
+  platform's request size limit never applies.
+- **Nothing times out** — short clips are converted inside the serverless function, everything
+  else is queued in the database for a worker: `npm run worker` on any machine with ffmpeg, or
+  `python -m worker`, which reuses the bot's pipeline and its tests.
+
+Quick start:
+
+```bash
+npm install
+cp .env.example .env          # DATABASE_URL, STORAGE_DRIVER, APP_PASSWORD, APP_SECRET…
+npm run dev                   # http://localhost:3000
+```
+
+On Vercel: import the repository, connect a Blob store, set `DATABASE_URL` plus `APP_PASSWORD`
+and `APP_SECRET`, and deploy. **[docs/VERCEL.md](docs/VERCEL.md)** has the full guide (database
+URLs per provider, S3 CORS, ffmpeg on Vercel, the Telegram webhook, workers and tuning).
+
+`docker compose up --build` runs the app with SQLite, local storage and a Python worker.
+
+The Telegram bot still works exactly as described in this README. Webhook mode and polling mode
+are mutually exclusive — Telegram delivers updates to one place — so when the web app owns the
+webhook, run `python -m worker` instead of `python -m video_convertor_bot`.
+
+---
+
 ## Send videos as a File
 
 Telegram compresses a video that is sent as **Photo or Video** before the bot ever sees it. To send the original:
@@ -130,7 +169,10 @@ Keep the bot and the server on the same machine. Local mode needs both to see th
 
 ## Settings
 
-All settings are environment variables, or lines in `.env`. See `.env.example`.
+For the bot, all settings are environment variables, or lines in `.env`. See `.env.example`.
+The web app reads the same variables, and lets you override the quality, limits, allowed user
+IDs and Telegram details on its Settings page — those live in the database and win over the
+environment, so you can retune without a redeploy.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -167,7 +209,8 @@ It prints the sizes, PSNR, SSIM and, if your ffmpeg has `libvmaf` (Homebrew's do
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest
+python -m pytest          # the bot, its pipeline and the Python worker
+npm test                  # the web API, the encoding layer and the UI
 ```
 
 The tests need `ffmpeg` and `ffprobe` on your `PATH`. Tests that need them are skipped if they are missing.
@@ -176,7 +219,21 @@ The tests need `ffmpeg` and `ffprobe` on your `PATH`. Tests that need them are s
 - **Integration tests** generate small iPhone-style clips with ffmpeg and run real encodes. They check the orientation, colour tags, audio, metadata and quality of the output.
 - **End-to-end tests** run the real bot against a fake Telegram Bot API server in `tests/fake_telegram.py`. They send it updates, check the messages and uploads it produces, and run the actual `python -m video_convertor_bot` polling loop. They need no internet access and no bot token.
 
-Not covered by the tests: live Telegram traffic and Telegram's own local server. Those need a real bot and a real iPhone video.
+The JavaScript suite (`tests-js/`) covers:
+
+- the HTTP API end to end against a temporary SQLite database and real inline conversions —
+  upload, convert, download, worker claim/complete, and a Telegram update arriving at the
+  webhook (against a fake Bot API server);
+- the encoding layer: the ffmpeg command, probe parsing, and real encodes of a synthetic
+  portrait HDR iPhone clip with PSNR checks;
+- the UI, rendered in jsdom: uploading, the "queued for a worker" notice, converting in place,
+  the history table and the settings form.
+
+`npm test` needs ffmpeg on `PATH` (or `FFMPEG_PATH`); tests that need it skip themselves if it
+is missing.
+
+Not covered by the tests: live Telegram traffic and Telegram's own local server. Those need a
+real bot and a real iPhone video.
 
 ---
 
@@ -200,6 +257,13 @@ video_convertor_bot/
   media.py      ffprobe, the ffmpeg command, progress and output checks
   pipeline.py   converts one video, then decides whether to send the converted or the original file
   bot.py        Telegram handlers, the application and the entry point
+worker/         conversion worker for the web app (uses the pipeline above)
+app/            Next.js web UI, API routes and the Telegram webhook
+components/     the UI: upload, history, settings
+lib/            database, settings, storage, encoding, jobs, Telegram — shared by app and worker
+cli/            the Node worker (`npm run worker`)
 tests/          unit, ffmpeg integration and fake Bot API end-to-end tests
+tests-js/       API, encoding and UI tests (vitest)
+docs/VERCEL.md  deploying the web app on Vercel
 scripts/compare_quality.sh   compares a converted file with the original
 ```
