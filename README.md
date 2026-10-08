@@ -66,7 +66,7 @@ On macOS with Homebrew:
 brew install ffmpeg
 ```
 
-Homebrew's ffmpeg includes the `libx265` HEVC encoder and `ffprobe`. On Linux, any ffmpeg build with `libx265` works.
+Homebrew's ffmpeg includes the `libx265` HEVC encoder and `ffprobe`. On Linux, any ffmpeg build with `libx265` works. Use ffmpeg 5.1 or newer.
 
 ### 3. Install the bot
 
