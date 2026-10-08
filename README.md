@@ -2,7 +2,7 @@
 
 A Telegram bot that makes iPhone videos smaller while keeping them looking the same as the original recording.
 
-Send the bot a video. It re-encodes it to HEVC (H.265), the codec your iPhone records in, and sends back a smaller file with:
+Send the bot a video. It re-encodes it to HEVC (H.265), the codec iPhones record in by default, and sends back a smaller file with:
 
 - the same resolution, orientation and frame rate
 - the same 10-bit colour and HDR tags (HLG or HDR10)
