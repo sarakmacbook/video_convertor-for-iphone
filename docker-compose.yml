@@ -1,0 +1,60 @@
+# Run the web app, its database and a converter worker on one machine:
+#
+#   cp .env.example .env      # set WORKER_SECRET (and BOT_TOKEN if you want Telegram)
+#   docker compose up --build
+#
+# Then open http://localhost:3000. SQLite and the uploaded files live in the `app-data` volume.
+#
+# For Vercel, this file is not used — see docs/VERCEL.md.
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # SQLite and local storage, on a volume that survives restarts.
+      DATABASE_URL: file:/data/app.db
+      STORAGE_DRIVER: local
+      STORAGE_DIR: /data/storage
+      WORK_DIR: /data/tmp
+      # Protect the UI. Without APP_PASSWORD anyone who can reach the port can use it.
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      APP_SECRET: ${APP_SECRET:-}
+      # Workers authenticate with this; it must match the worker service below.
+      WORKER_SECRET: ${WORKER_SECRET:-changeme-in-dot-env}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      TELEGRAM_API_URL: ${TELEGRAM_API_URL:-}
+      TELEGRAM_LOCAL_MODE: ${TELEGRAM_LOCAL_MODE:-false}
+      ALLOWED_USER_IDS: ${ALLOWED_USER_IDS:-}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      CRF: ${CRF:-20}
+      X265_PRESET: ${X265_PRESET:-medium}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - app-data:/data
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      # Inside the compose network the app answers to its service name. Signed upload and
+      # download URLs are built from the address the worker used, so this works as it is.
+      APP_URL: http://app:3000
+      WORKER_SECRET: ${WORKER_SECRET:-changeme-in-dot-env}
+      WORKER_NAME: ${WORKER_NAME:-docker-worker}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      # Needed to fetch videos from, and send results to, a local Telegram Bot API server.
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      TELEGRAM_API_URL: ${TELEGRAM_API_URL:-}
+      TELEGRAM_LOCAL_MODE: ${TELEGRAM_LOCAL_MODE:-false}
+      FFMPEG_TIMEOUT_SECONDS: ${FFMPEG_TIMEOUT_SECONDS:-7200}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  app-data:
