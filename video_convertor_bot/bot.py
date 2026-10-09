@@ -1,4 +1,9 @@
-"""Telegram front end: receive a video, convert it, send the smaller file back."""
+"""Telegram front end: receive a video, ask what to make from it, convert it, send the result back.
+
+Flow: the user sends a video, the bot replies with a menu of conversions (as a reply to that
+video), the user taps one, and the bot converts and sends the file. The menu does not keep any
+state: the video is read back from the message the menu replies to, so it works after a restart.
+"""
 
 from __future__ import annotations
 
@@ -13,17 +18,26 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import Document, Message, Update, Video
+from telegram import (
+    Document,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+    Video,
+)
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
+from .captions import describe_result, format_duration, format_mb
 from .config import (
     CLOUD_DOWNLOAD_LIMIT_MB,
     CLOUD_UPLOAD_LIMIT_MB,
@@ -32,7 +46,23 @@ from .config import (
     Settings,
     load_settings,
 )
-from .media import EncodeError, EncodeTimeoutError, MediaError, NotAVideoError, ProbeError, missing_tools
+from .conversions import (
+    CALLBACK_PREFIX,
+    CONVERSIONS,
+    Conversion,
+    callback_data,
+    get_conversion,
+    key_from_callback,
+)
+from .media import (
+    EncodeError,
+    EncodeTimeoutError,
+    MediaError,
+    NoAudioError,
+    NotAVideoError,
+    ProbeError,
+    missing_tools,
+)
 from .pipeline import ConversionResult, convert_video
 
 logger = logging.getLogger("video_convertor_bot")
@@ -41,11 +71,24 @@ VIDEO_EXTENSIONS = frozenset(
     {".mov", ".mp4", ".m4v", ".hevc", ".3gp", ".mkv", ".webm", ".avi", ".mpg", ".mpeg", ".ts", ".mts", ".m2ts"}
 )
 
+# Rows of the conversion menu. Every conversion in CONVERSIONS must appear once (a test checks it).
+CHOICE_LAYOUT: tuple[tuple[str, ...], ...] = (
+    ("hevc", "h264"),
+    ("hevc720", "hevc480"),
+    ("gif",),
+    ("m4a", "mp3"),
+)
+
 TEXT_START = (
-    "👋 Send me a video and I'll make the file smaller without making it look any different.\n\n"
+    "👋 Send me a video, then pick what to make from it:\n\n"
+    "• 🗜 Smaller (HEVC): the same video in a smaller file.\n"
+    "• 📐 720p or 480p: the same video, scaled down.\n"
+    "• 📱 MP4 (H.264): for devices and apps that can't play HEVC.\n"
+    "• 🎞 GIF: the first 10 seconds as an animation.\n"
+    "• 🎵 Audio: just the sound, as M4A or MP3.\n\n"
     "• Send it as a File (📎 → File). A normal video is compressed by Telegram before it reaches me.\n"
-    "• Resolution, frame rate, HDR colour, sound, capture date and location are kept.\n"
-    "• The video is re-encoded to HEVC (H.265) at a visually lossless setting. A re-encode can never be "
+    "• For the smaller file, resolution, frame rate, HDR colour, sound, capture date and location are kept.\n"
+    "• The smaller file is re-encoded at a visually lossless setting. A re-encode can never be "
     "bit-for-bit identical to the original; the aim is a difference you can't see when watching.\n"
     "• If re-encoding would not make a file smaller, I send your original back."
 )
@@ -59,6 +102,15 @@ TEXT_CLOUD_HINT = (
 )
 TEXT_PRIVATE = "Sorry, this bot is private."
 TEXT_NOT_VIDEO = "That doesn't look like a video. Send a video file, ideally as a File so Telegram doesn't compress it."
+TEXT_CHOOSE = (
+    "What should I make from this video?\n\n"
+    "🗜 Smaller: the same video, HEVC, looks the same.\n"
+    "📐 720p / 480p: scaled down, never up.\n"
+    "📱 MP4 (H.264): plays on almost any device.\n"
+    "🎞 GIF: the first 10 seconds, up to 480 px.\n"
+    "🎵 Audio: just the sound, as M4A or MP3."
+)
+TEXT_CHOICE_EXPIRED = "I can't find the video for this button any more. Send the video again."
 TEXT_QUEUED = "⏳ Queued. Another video is being converted."
 TEXT_DOWNLOADING = "📥 Downloading…"
 TEXT_CONVERTING = "⚙️ Converting… {pct}%"
@@ -66,6 +118,7 @@ TEXT_SENDING = "📤 Sending…"
 TEXT_DONE = "✅ Done"
 TEXT_FAILED_STATUS = "❌ Could not convert this video"
 TEXT_UNREADABLE = "I couldn't read this video. Try sending it again as a File."
+TEXT_NO_AUDIO = "This video has no sound, so there is no audio to save."
 TEXT_TIMEOUT = "Converting this video took too long, so I stopped it."
 TEXT_FAILED = "Something went wrong while converting this video. The bot owner can check the logs."
 TEXT_TOO_LARGE_TO_SEND = "The converted video is {size}, which is over the upload limit of {limit} for this bot."
@@ -120,28 +173,13 @@ def safe_extension(name: str | None) -> str:
     return suffix if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix) else ""
 
 
-def format_mb(size_bytes: int) -> str:
-    return f"{size_bytes / 1_000_000:.1f} MB"
-
-
-def format_duration(seconds: float) -> str:
-    total = int(round(seconds))
-    hours, rest = divmod(total, 3600)
-    minutes, secs = divmod(rest, 60)
-    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
-
-
-def describe_result(result: ConversionResult) -> str:
-    info = result.source
-    size = f"{info.display_width}×{info.display_height} · {format_duration(info.duration)}"
-    if result.used_original:
-        return f"ℹ️ Sending your original ({format_mb(result.source_bytes)}): {result.reason}.\n{size}"
-    depth = "10-bit HDR" if info.is_hdr else ("10-bit" if info.bit_depth >= 10 else "8-bit")
-    return (
-        f"✅ {format_mb(result.output_bytes)} (was {format_mb(result.source_bytes)}, "
-        f"{result.saved_percent:.0f}% smaller)\n"
-        f"{size} · HEVC {depth}"
-    )
+def choice_keyboard() -> InlineKeyboardMarkup:
+    by_key = {conversion.key: conversion for conversion in CONVERSIONS}
+    rows = [
+        [InlineKeyboardButton(by_key[key].button, callback_data=callback_data(key)) for key in row]
+        for row in CHOICE_LAYOUT
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 def too_big_text(size: int, settings: Settings) -> str:
@@ -157,7 +195,7 @@ def start_text(settings: Settings) -> str:
 
 async def _safe_edit(message: Message, text: str) -> None:
     try:
-        await message.edit_text(text)
+        await message.edit_text(text)  # without a keyboard, this also removes the menu's buttons
     except TelegramError as exc:  # deleted, unchanged, or rate limited: progress updates are best-effort
         logger.debug("could not update status message: %s", exc)
 
@@ -196,6 +234,37 @@ async def download_source(bot, media: Video | Document, fallback_stem: str, src_
     return target
 
 
+async def send_result(message: Message, result: ConversionResult) -> None:
+    """Send the converted file in the form Telegram shows best for it: video, GIF or audio."""
+    caption = describe_result(result)
+    path = str(result.output_path)
+    if result.used_original:
+        await message.reply_document(document=path, caption=caption)
+        return
+
+    info = result.output or result.source
+    kind = result.conversion.kind
+    if kind == "gif":
+        await message.reply_animation(
+            animation=path,
+            caption=caption,
+            width=info.display_width or None,
+            height=info.display_height or None,
+            duration=round(info.duration) or None,
+        )
+    elif kind == "audio":
+        await message.reply_audio(audio=path, caption=caption, duration=round(info.duration) or None)
+    else:
+        await message.reply_video(
+            video=path,
+            caption=caption,
+            width=info.display_width,
+            height=info.display_height,
+            duration=round(info.duration),
+            supports_streaming=True,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Handlers
 # --------------------------------------------------------------------------- #
@@ -224,6 +293,7 @@ async def on_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A video arrived: check it, then ask what to make from it. Nothing is downloaded yet."""
     message = update.effective_message
     if message is None:
         return
@@ -243,11 +313,55 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text(too_big_text(size, settings))
         return
 
-    logger.info("job from user %s, %d bytes", user_id, size)
-    status = await message.reply_text(TEXT_QUEUED)
+    logger.info("video from user %s, %d bytes: asking what to make", user_id, size)
+    # do_quote makes the menu a reply to the video. The button handler reads the video back from it.
+    await message.reply_text(TEXT_CHOOSE, reply_markup=choice_keyboard(), do_quote=True)
+
+
+async def on_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A conversion button was tapped: convert the video the menu was replying to."""
+    query = update.callback_query
+    if query is None:
+        return
+    settings: Settings = context.bot_data["settings"]
+    if not is_allowed(settings, query.from_user.id if query.from_user else None):
+        await query.answer(TEXT_PRIVATE, show_alert=True)
+        return
+
+    key = key_from_callback(query.data)
+    menu = query.message if isinstance(query.message, Message) else None
+    upload = menu.reply_to_message if menu is not None else None
+    media = pick_video(upload) if upload is not None else None
+    if key is None or menu is None or upload is None or media is None:
+        await query.answer(TEXT_CHOICE_EXPIRED, show_alert=True)
+        return
+    await query.answer()  # stops the spinner on the button
+
+    busy: set[tuple[int, int]] = context.bot_data.setdefault("busy_menus", set())
+    token = (menu.chat_id, menu.message_id)
+    if token in busy:  # a second tap while the first one is still running
+        return
+    busy.add(token)
+    try:
+        conversion = get_conversion(key)
+        logger.info("job from user %s: %s", query.from_user.id if query.from_user else None, conversion.key)
+        await _safe_edit(menu, TEXT_QUEUED)  # the menu becomes the status message and loses its buttons
+        await _run_job(context, upload, menu, media, conversion, settings)
+    finally:
+        busy.discard(token)
+
+
+async def _run_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    message: Message,
+    status: Message,
+    media: Video | Document,
+    conversion: Conversion,
+    settings: Settings,
+) -> None:
     job_dir = Path(tempfile.mkdtemp(prefix="convert-", dir=settings.work_dir))
     try:
-        await _convert_and_send(context, message, status, media, job_dir, settings)
+        await _convert_and_send(context, message, status, media, job_dir, settings, conversion)
     except TooLargeToSendError as exc:
         text = TEXT_TOO_LARGE_TO_SEND.format(size=format_mb(exc.size), limit=format_mb(exc.limit))
         await _fail(message, status, text)
@@ -255,6 +369,8 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _fail(message, status, TEXT_NOT_VIDEO)
     except ProbeError:
         await _fail(message, status, TEXT_UNREADABLE)
+    except NoAudioError:
+        await _fail(message, status, TEXT_NO_AUDIO)
     except EncodeTimeoutError:
         await _fail(message, status, TEXT_TIMEOUT)
     except EncodeError:
@@ -286,6 +402,7 @@ async def _convert_and_send(
     media: Video | Document,
     job_dir: Path,
     settings: Settings,
+    conversion: Conversion,
 ) -> None:
     slots: asyncio.Semaphore = context.bot_data["slots"]
     async with slots:  # one encode at a time by default; other jobs wait here
@@ -297,28 +414,17 @@ async def _convert_and_send(
         result = await convert_video(
             source,
             job_dir,
-            out_name=f"{source.stem}_small.mp4",
+            out_name=f"{source.stem}{conversion.name_suffix}{conversion.extension}",
             opts=settings.encode_options,
             progress=ProgressReporter(status),
+            conversion=conversion,
         )
 
     await _safe_edit(status, TEXT_SENDING)
     if result.delivered_bytes > settings.upload_limit_bytes:
         raise TooLargeToSendError(result.delivered_bytes, settings.upload_limit_bytes)
 
-    caption = describe_result(result)
-    if result.used_original:
-        await message.reply_document(document=str(result.output_path), caption=caption)
-    else:
-        info = result.output or result.source
-        await message.reply_video(
-            video=str(result.output_path),
-            caption=caption,
-            width=info.display_width,
-            height=info.display_height,
-            duration=round(info.duration),
-            supports_streaming=True,
-        )
+    await send_result(message, result)
     await _safe_edit(status, TEXT_DONE)
 
 
@@ -337,6 +443,9 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # --------------------------------------------------------------------------- #
 # Application
 # --------------------------------------------------------------------------- #
+
+# The updates the bot needs: messages (videos, commands) and taps on the conversion menu.
+ALLOWED_UPDATES = [Update.MESSAGE, Update.CALLBACK_QUERY]
 
 
 def build_application(settings: Settings) -> Application:
@@ -359,6 +468,7 @@ def build_application(settings: Settings) -> Application:
     private = filters.ChatType.PRIVATE
     app.add_handler(CommandHandler(["start", "help"], on_start, filters=private))
     app.add_handler(MessageHandler(private & (filters.VIDEO | filters.Document.ALL), on_media))
+    app.add_handler(CallbackQueryHandler(on_choice, pattern=f"^{re.escape(CALLBACK_PREFIX)}"))
     app.add_handler(MessageHandler(private, on_other))
     app.add_error_handler(on_error)
     return app
@@ -396,4 +506,15 @@ def main() -> None:
         settings.max_input_mb,
         settings.max_concurrent_jobs,
     )
-    build_application(settings).run_polling(allowed_updates=Update.MESSAGE)
+    build_application(settings).run_polling(allowed_updates=ALLOWED_UPDATES)
+
+
+__all__ = [
+    "CHOICE_LAYOUT",
+    "build_application",
+    "choice_keyboard",
+    "describe_result",
+    "format_duration",
+    "format_mb",
+    "main",
+]

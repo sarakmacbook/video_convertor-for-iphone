@@ -117,6 +117,22 @@ export async function getJob(id: string): Promise<Job | null> {
   return job ?? null;
 }
 
+/**
+ * The job already made from this Telegram video, if any. A second tap on a menu button (or a
+ * Telegram retry) must not start a second conversion of the same file.
+ */
+export async function findTelegramJob(chatId: number, messageId: number): Promise<Job | null> {
+  const handle = await db();
+  const job = await handle
+    .selectFrom("jobs")
+    .selectAll()
+    .where("telegram_chat_id", "=", chatId)
+    .where("telegram_message_id", "=", messageId)
+    .orderBy("created_at", "desc")
+    .executeTakeFirst();
+  return job ?? null;
+}
+
 export interface JobQuery {
   status?: JobStatus | "active" | "all";
   source?: JobSource;

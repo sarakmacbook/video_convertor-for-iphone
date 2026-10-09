@@ -15,7 +15,7 @@ from telegram import Update
 
 from tests.fake_telegram import FakeBotApi
 from tests.helpers import TEST_TOKEN, TEST_USER_ID
-from tests.helpers import message_update, probe_json
+from tests.helpers import callback_update, message_update, probe_json
 from video_convertor_bot.bot import (
     TEXT_CLOUD_HINT,
     TEXT_NOT_VIDEO,
@@ -63,6 +63,12 @@ def run_update(settings: Settings, payload: dict) -> None:
     asyncio.run(go())
 
 
+def send_and_choose(settings: Settings, update: dict, key: str = "hevc") -> None:
+    """Send a video, then tap the conversion button: what a user does in the chat."""
+    run_update(settings, update)
+    run_update(settings, callback_update(update["message"], key))
+
+
 def sent_texts(api: FakeBotApi) -> list[str]:
     texts = []
     for call in api.calls_to("sendMessage") + api.calls_to("editMessageText"):
@@ -83,7 +89,7 @@ def test_video_message_comes_back_smaller_and_still_looks_the_same(api, ffmpeg_o
     video = {"file_id": "vid-1", "file_unique_id": "u1", "width": 1280, "height": 720,
              "duration": 2, "file_size": len(original)}
 
-    run_update(make_settings(api, ffmpeg_opts), message_update(video=video))
+    send_and_choose(make_settings(api, ffmpeg_opts), message_update(video=video))
 
     sent = api.calls_to("sendVideo")
     assert len(sent) == 1, api.calls
@@ -108,7 +114,7 @@ def test_document_from_iphone_files_app_is_accepted(api, ffmpeg_opts, clips, tmp
     document = {"file_id": "doc-1", "file_unique_id": "u2", "file_name": "IMG_0042.MOV",
                 "mime_type": "video/quicktime", "file_size": len(original)}
 
-    run_update(make_settings(api, ffmpeg_opts), message_update(document=document))
+    send_and_choose(make_settings(api, ffmpeg_opts), message_update(document=document))
 
     sent = api.calls_to("sendVideo")
     assert len(sent) == 1
@@ -121,7 +127,7 @@ def test_document_with_video_extension_but_generic_type_is_accepted(api, ffmpeg_
     document = {"file_id": "doc-2", "file_unique_id": "u3", "file_name": "holiday.mp4",
                 "mime_type": "application/octet-stream", "file_size": len(original)}
 
-    run_update(make_settings(api, ffmpeg_opts), message_update(document=document))
+    send_and_choose(make_settings(api, ffmpeg_opts), message_update(document=document))
 
     assert len(api.calls_to("sendVideo")) == 1
 
@@ -164,7 +170,7 @@ def test_telegram_refusing_the_download_is_explained(api, ffmpeg_opts):
     api.serve_file("huge-1", b"\0" * 21_000_000, file_path="videos/file_9.mov")
     video = {"file_id": "huge-1", "file_unique_id": "u6", "width": 1920, "height": 1080, "duration": 90}
 
-    run_update(make_settings(api, ffmpeg_opts), message_update(video=video))
+    send_and_choose(make_settings(api, ffmpeg_opts), message_update(video=video))
 
     assert TEXT_CLOUD_HINT in sent_texts(api)
     assert api.calls_to("sendVideo") == []
@@ -187,7 +193,7 @@ def test_allowed_user_gets_service(api, ffmpeg_opts, clips):
     video = {"file_id": "vid-ok", "file_unique_id": "u8", "width": 1280, "height": 720, "duration": 2,
              "file_size": len(original)}
 
-    run_update(make_settings(api, ffmpeg_opts, allowed_user_ids=frozenset({USER_ID})), message_update(video=video))
+    send_and_choose(make_settings(api, ffmpeg_opts, allowed_user_ids=frozenset({USER_ID})), message_update(video=video))
 
     assert len(api.calls_to("sendVideo")) == 1
 
@@ -198,7 +204,7 @@ def test_already_compressed_video_is_sent_back_as_the_original(api, ffmpeg_opts,
     video = {"file_id": "tiny-1", "file_unique_id": "u9", "width": 640, "height": 360, "duration": 2,
              "file_size": len(original)}
 
-    run_update(make_settings(api, ffmpeg_opts), message_update(video=video))
+    send_and_choose(make_settings(api, ffmpeg_opts), message_update(video=video))
 
     assert api.calls_to("sendVideo") == []
     documents = api.calls_to("sendDocument")
@@ -212,7 +218,7 @@ def test_unreadable_file_is_reported(api, ffmpeg_opts):
     video = {"file_id": "junk-1", "file_unique_id": "u10", "width": 1, "height": 1, "duration": 1,
              "file_size": 27}
 
-    run_update(make_settings(api, ffmpeg_opts), message_update(video=video))
+    send_and_choose(make_settings(api, ffmpeg_opts), message_update(video=video))
 
     assert TEXT_UNREADABLE in sent_texts(api)
     assert api.calls_to("sendVideo") == []
@@ -230,7 +236,7 @@ def test_local_server_mode_reads_and_uploads_by_file_path(api, ffmpeg_opts, clip
              "file_size": local_copy.stat().st_size}
 
     settings = make_settings(api, ffmpeg_opts, local_mode=True, max_input_mb=2000)
-    run_update(settings, message_update(video=video))
+    send_and_choose(settings, message_update(video=video))
 
     assert api.downloads == [], "a local file must not be fetched over HTTP"
     sent = api.calls_to("sendVideo")
@@ -247,7 +253,7 @@ def test_converted_file_over_the_upload_limit_is_not_sent(api, ffmpeg_opts, clip
              "file_size": len(original)}
     monkeypatch.setattr(Settings, "upload_limit_bytes", property(lambda self: 1_000))
 
-    run_update(make_settings(api, ffmpeg_opts), message_update(video=video))
+    send_and_choose(make_settings(api, ffmpeg_opts), message_update(video=video))
 
     assert api.calls_to("sendVideo") == []
     assert any("over the upload limit" in t for t in sent_texts(api)), sent_texts(api)

@@ -34,6 +34,46 @@ def message_update(*, video=None, document=None, text=None, user_id=TEST_USER_ID
     return {"update_id": 1, "message": message}
 
 
+MENU_TEXT = "What should I make from this video?"
+
+
+def callback_update(
+    upload: dict,
+    key: str,
+    *,
+    menu_id: int = 2000,
+    user_id: int = TEST_USER_ID,
+    data: str | None = None,
+    menu_replies_to_upload: bool = True,
+) -> dict:
+    """A tap on a conversion button, as Telegram delivers it.
+
+    The bot's menu is a reply to the uploaded video, so the callback carries that video back in
+    `message.reply_to_message`. That is how the bot knows which video the button is for.
+    """
+    chat = upload["chat"]
+    menu: dict = {
+        "message_id": menu_id,
+        "date": 1_700_000_001,
+        "chat": chat,
+        "from": {"id": 42, "is_bot": True, "first_name": "Test Convertor", "username": "test_convertor_bot"},
+        "text": MENU_TEXT,
+        "reply_markup": {"inline_keyboard": []},
+    }
+    if menu_replies_to_upload:
+        menu["reply_to_message"] = upload
+    return {
+        "update_id": 2,
+        "callback_query": {
+            "id": f"cb-{menu_id}-{key}",
+            "from": {"id": user_id, "is_bot": False, "first_name": "Sam"},
+            "chat_instance": "test-instance",
+            "message": menu,
+            "data": data if data is not None else f"conv:{key}",
+        },
+    }
+
+
 
 
 

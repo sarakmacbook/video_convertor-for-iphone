@@ -2,14 +2,24 @@
 
 A Telegram bot that makes iPhone videos smaller while keeping them looking the same as the original recording.
 
-Send the bot a video. It re-encodes it to HEVC (H.265), the codec iPhones record in by default, and sends back a smaller file with:
+Send the bot a video. It replies with a menu of what to make from it, and you pick one:
+
+- **🗜 Smaller (HEVC)**: re-encodes to HEVC (H.265), the codec iPhones record in by default, for a smaller file.
+- **📐 720p / 480p**: the same, scaled down so the shorter side is at most 720 or 480 pixels. Never scaled up.
+- **📱 MP4 (H.264)**: 8-bit H.264 for devices and apps that cannot play HEVC. An HDR video is converted to SDR.
+- **🎞 GIF**: the first 10 seconds as an animation, up to 480 pixels.
+- **🎵 Audio (M4A or MP3)**: just the sound from the video.
+
+The smaller HEVC file keeps:
 
 - the same resolution, orientation and frame rate
 - the same 10-bit colour and HDR tags (HLG or HDR10)
 - the same sound (AAC audio is copied without re-encoding)
 - the same capture date and GPS location
 
-The reply shows the before and after sizes. If re-encoding would not make a file smaller, the bot sends your original back.
+The reply shows the before and after sizes. For the smaller HEVC file, if re-encoding would not make a file smaller, the bot sends your original back. The other choices always send what you asked for.
+
+> **Upgrading an existing deployment:** the menu uses Telegram's `callback_query` updates. The Python bot asks for them automatically. The web app's webhook must be registered again (Settings → Telegram → *Set webhook*), or the buttons will do nothing.
 
 > **Status:** the converter and the bot are tested with ffmpeg 7.0 and python-telegram-bot 22.8 on Linux. Talking to real Telegram (and to Telegram's local server) has **not** been tested from the environment this was built in. Try it with your own bot token first. The macOS steps below use Homebrew and have not been run on a Mac.
 
@@ -127,7 +137,7 @@ Open `.env` and set `BOT_TOKEN` to the token from BotFather.
 python -m video_convertor_bot
 ```
 
-Open your bot in Telegram, send `/start`, then send it a video as a File.
+Open your bot in Telegram, send `/start`, then send it a video as a File and pick a button from the menu.
 
 Set `ALLOWED_USER_IDS` in `.env` to your own Telegram user ID (any "my user ID" bot on Telegram will tell you it). Without it, anyone who finds the bot can use it, and each conversion uses your computer's CPU.
 
@@ -215,7 +225,7 @@ npm test                  # the web API, the encoding layer and the UI
 
 The tests need `ffmpeg` and `ffprobe` on your `PATH`. Tests that need them are skipped if they are missing.
 
-- **Unit tests** cover settings, ffprobe parsing, the encode command, progress parsing and the output checks.
+- **Unit tests** cover settings, ffprobe parsing, the encode command, progress parsing, the output checks, the conversion menu and each conversion's command.
 - **Integration tests** generate small iPhone-style clips with ffmpeg and run real encodes. They check the orientation, colour tags, audio, metadata and quality of the output.
 - **End-to-end tests** run the real bot against a fake Telegram Bot API server in `tests/fake_telegram.py`. They send it updates, check the messages and uploads it produces, and run the actual `python -m video_convertor_bot` polling loop. They need no internet access and no bot token.
 

@@ -20,6 +20,15 @@ export class TelegramError extends Error {
   }
 }
 
+export interface InlineKeyboardButton {
+  text: string;
+  callback_data: string;
+}
+
+export interface InlineKeyboardMarkup {
+  inline_keyboard: InlineKeyboardButton[][];
+}
+
 export interface TelegramClientOptions {
   token: string;
   apiUrl?: string;
@@ -75,13 +84,14 @@ export class TelegramClient {
     fileField: string,
     filePath: string,
     params: Record<string, unknown> = {},
+    contentType?: string,
   ): Promise<T> {
     const form = new FormData();
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined || value === null) continue;
       form.set(key, typeof value === "object" ? JSON.stringify(value) : String(value));
     }
-    const blob = await openAsBlob(filePath);
+    const blob = await openAsBlob(filePath, contentType ? { type: contentType } : undefined);
     form.set(fileField, blob, filePath.split("/").pop() ?? "video.mp4");
 
     const response = await fetch(this.#methodUrl(method), { method: "POST", body: form });
@@ -109,7 +119,8 @@ export class TelegramClient {
     return this.call<boolean>("setWebhook", {
       url: options.url,
       secret_token: options.secretToken,
-      allowed_updates: options.allowedUpdates ?? ["message"],
+      // callback_query carries the button presses of the conversion menu.
+      allowed_updates: options.allowedUpdates ?? ["message", "callback_query"],
       drop_pending_updates: options.dropPendingUpdates ?? false,
     });
   }
@@ -130,22 +141,46 @@ export class TelegramClient {
     return this.call("getWebhookInfo");
   }
 
-  async sendMessage(chatId: number, text: string, options: { messageId?: number; threadId?: number } = {}) {
+  async sendMessage(
+    chatId: number,
+    text: string,
+    options: { messageId?: number; threadId?: number; replyMarkup?: InlineKeyboardMarkup } = {},
+  ) {
     return this.call<{ message_id: number }>("sendMessage", {
       chat_id: chatId,
       text,
       link_preview_options: { is_disabled: true },
       ...(options.messageId ? { reply_to_message_id: options.messageId } : {}),
       ...(options.threadId ? { message_thread_id: options.threadId } : {}),
+      ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
     });
   }
 
-  async editMessageText(chatId: number, messageId: number, text: string): Promise<void> {
+  /**
+   * Replace a message's text. Pass `replyMarkup` with no rows to remove its buttons, or leave
+   * it out to keep them as they are.
+   */
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    options: { replyMarkup?: InlineKeyboardMarkup } = {},
+  ): Promise<void> {
     await this.call("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
       text,
       link_preview_options: { is_disabled: true },
+      ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
+    });
+  }
+
+  /** Stops the spinner on a pressed button. With `text`, Telegram shows it as a popup (or an alert). */
+  async answerCallbackQuery(callbackQueryId: string, options: { text?: string; showAlert?: boolean } = {}): Promise<void> {
+    await this.call("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      ...(options.text ? { text: options.text } : {}),
+      ...(options.showAlert ? { show_alert: true } : {}),
     });
   }
 
@@ -184,6 +219,56 @@ export class TelegramClient {
       reply_to_message_id: options.replyToMessageId,
       message_thread_id: options.threadId,
     });
+  }
+
+  /** A GIF sent as an animation: Telegram shows it looping, the way a GIF is meant to be seen. */
+  async sendAnimation(
+    chatId: number,
+    filePath: string,
+    options: {
+      caption?: string;
+      width?: number | null;
+      height?: number | null;
+      duration?: number | null;
+      replyToMessageId?: number;
+      threadId?: number;
+    } = {},
+  ) {
+    return this.callWithFile<{ message_id: number }>(
+      "sendAnimation",
+      "animation",
+      filePath,
+      {
+        chat_id: chatId,
+        caption: options.caption,
+        width: options.width ?? undefined,
+        height: options.height ?? undefined,
+        duration: options.duration ? Math.round(options.duration) : undefined,
+        reply_to_message_id: options.replyToMessageId,
+        message_thread_id: options.threadId,
+      },
+      "image/gif",
+    );
+  }
+
+  async sendAudio(
+    chatId: number,
+    filePath: string,
+    options: { caption?: string; duration?: number | null; replyToMessageId?: number; threadId?: number; contentType?: string } = {},
+  ) {
+    return this.callWithFile<{ message_id: number }>(
+      "sendAudio",
+      "audio",
+      filePath,
+      {
+        chat_id: chatId,
+        caption: options.caption,
+        duration: options.duration ? Math.round(options.duration) : undefined,
+        reply_to_message_id: options.replyToMessageId,
+        message_thread_id: options.threadId,
+      },
+      options.contentType,
+    );
   }
 
   async getFile(fileId: string): Promise<{ file_id: string; file_path?: string; file_size?: number }> {

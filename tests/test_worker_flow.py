@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests.helpers import run_ffmpeg
-from video_convertor_bot.media import EncodeOptions
+from video_convertor_bot.media import EncodeOptions, NoAudioError
 from worker.client import WorkerApiError, WorkerClient
 from worker.runner import TelegramDelivery, run_one
 from worker.text import describe_result
@@ -27,6 +27,8 @@ class SimpleServer(BaseHTTPRequestHandler):
     clip: bytes = b""
     uploaded: bytearray = bytearray()
     reports: list[dict] = []
+    conversion: str = "hevc"  # what the control plane asks for in encoding.conversion
+    output_name: str = "clip_small.mp4"
 
     def log_message(self, *args):
         pass
@@ -65,13 +67,19 @@ class SimpleServer(BaseHTTPRequestHandler):
                         "downloadUrl": f"http://127.0.0.1:{self.server.server_address[1]}/clip.mov",
                     },
                     "output": {
-                        "uploadUrl": f"http://127.0.0.1:{self.server.server_address[1]}/upload/clip_small.mp4",
+                        "uploadUrl": f"http://127.0.0.1:{self.server.server_address[1]}/upload/{self.__class__.output_name}",
                         "method": "PUT",
                         "headers": {},
-                        "key": "jobs/job_flow/output/clip_small.mp4",
-                        "name": "clip_small.mp4",
+                        "key": f"jobs/job_flow/output/{self.__class__.output_name}",
+                        "name": self.__class__.output_name,
                     },
-                    "encoding": {"crf": 40, "preset": "medium", "timeoutSeconds": 600, "maxInputMb": 20},
+                    "encoding": {
+                        "crf": 40,
+                        "preset": "medium",
+                        "timeoutSeconds": 600,
+                        "maxInputMb": 20,
+                        "conversion": self.__class__.conversion,
+                    },
                     "delivery": {"mode": "server"},
                 },
                 "leaseSeconds": 120,
@@ -93,6 +101,8 @@ class SimpleServer(BaseHTTPRequestHandler):
 def server():
     SimpleServer.reports = []
     SimpleServer.uploaded = bytearray()
+    SimpleServer.conversion = "hevc"
+    SimpleServer.output_name = "clip_small.mp4"
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), SimpleServer)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -158,6 +168,84 @@ def test_worker_converts_a_job_and_reports_sizes(ffmpeg_opts: EncodeOptions, ser
     assert complete["complete"]["outputBytes"] == outcome.output_bytes
     assert complete["complete"]["outputCodec"] == "hevc"
     assert complete["complete"]["usedOriginal"] is False
+
+
+def _noisy_clip(ffmpeg_opts: EncodeOptions, tmp_path: Path, *, with_audio: bool = True) -> bytes:
+    clip = tmp_path / "in.mov"
+    args = [
+        "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24:duration=2",
+    ]  # fmt: skip
+    if with_audio:
+        args += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"]
+    args += ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"]
+    args += ["-c:a", "aac"] if with_audio else ["-an"]
+    run_ffmpeg(ffmpeg_opts, *args, str(clip))
+    return clip.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("conversion", "output_name", "codec", "magic"),
+    [
+        ("gif", "clip_small.gif", "gif", b"GIF8"),
+        ("m4a", "clip_small.m4a", "aac", None),  # audio only: the codec is the audio codec
+        ("h264", "clip_small.mp4", "h264", None),
+    ],
+)
+def test_worker_runs_the_conversion_the_job_asks_for(
+    ffmpeg_opts: EncodeOptions, server, tmp_path: Path, conversion, output_name, codec, magic
+):
+    SimpleServer.clip = _noisy_clip(ffmpeg_opts, tmp_path)
+    SimpleServer.conversion = conversion
+    SimpleServer.output_name = output_name
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    client = WorkerClient(base, "secret", "flow-worker")
+    job = client.claim()
+    assert job is not None
+    assert job.conversion_key == conversion
+
+    telegram = TelegramDelivery(token=None, api_url=None, local_mode=False)
+    outcome = asyncio.run(run_one(client, job, ffmpeg_opts, telegram))
+
+    # A format conversion is always delivered, even when it is bigger than the original.
+    assert outcome.used_original is False
+    assert outcome.output_key == f"jobs/job_flow/output/{output_name}"
+    assert len(SimpleServer.uploaded) == outcome.output_bytes > 0
+    assert outcome.output_codec == codec
+    if magic is not None:
+        assert bytes(SimpleServer.uploaded).startswith(magic)
+    client.complete(
+        job.id,
+        used_original=outcome.used_original,
+        output_bytes=outcome.output_bytes,
+        output_key=outcome.output_key,
+        output_name=job.output_name,
+        output_width=outcome.output_width,
+        output_height=outcome.output_height,
+        output_codec=outcome.output_codec,
+        source_bytes=outcome.source_bytes,
+        saved_percent=outcome.saved_percent,
+        ffmpeg_version=None,
+        delivered_to_telegram=False,
+    )
+    complete = next(report for report in SimpleServer.reports if report.get("action") == "complete")
+    assert complete["complete"]["outputCodec"] == codec
+
+
+def test_a_video_without_sound_is_reported_when_asked_for_audio(ffmpeg_opts: EncodeOptions, server, tmp_path: Path):
+    SimpleServer.clip = _noisy_clip(ffmpeg_opts, tmp_path, with_audio=False)
+    SimpleServer.conversion = "m4a"
+    SimpleServer.output_name = "clip_small.m4a"
+
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    client = WorkerClient(base, "secret", "flow-worker")
+    job = client.claim()
+    assert job is not None
+
+    telegram = TelegramDelivery(token=None, api_url=None, local_mode=False)
+    with pytest.raises(NoAudioError):
+        asyncio.run(run_one(client, job, ffmpeg_opts, telegram))
+    assert len(SimpleServer.uploaded) == 0  # nothing is uploaded for a job that cannot run
 
 
 def test_a_job_that_lives_on_telegram_needs_a_token(server, tmp_path: Path):

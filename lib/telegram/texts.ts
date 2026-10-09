@@ -3,16 +3,37 @@
  * Telegram bot behaves identically whether it runs as a polling process or as this webhook.
  */
 
+import type { Conversion } from "@/lib/conversions";
 import { CLOUD_DOWNLOAD_LIMIT_MB, CLOUD_UPLOAD_LIMIT_MB } from "@/lib/settings/schema";
 
 export const TEXT_START = [
-  "👋 Send me a video and I'll make the file smaller without making it look any different.",
+  "👋 Send me a video, then pick what to make from it:",
+  "",
+  "• 🗜 Smaller (HEVC): the same video in a smaller file.",
+  "• 📐 720p or 480p: the same video, scaled down.",
+  "• 📱 MP4 (H.264): for devices and apps that can't play HEVC.",
+  "• 🎞 GIF: the first 10 seconds as an animation.",
+  "• 🎵 Audio: just the sound, as M4A or MP3.",
   "",
   "• Send it as a File (📎 → File). A normal video is compressed by Telegram before it reaches me.",
-  "• Resolution, frame rate, HDR colour, sound, capture date and location are kept.",
-  "• The video is re-encoded to HEVC (H.265) at a visually lossless setting.",
+  "• For the smaller file, resolution, frame rate, HDR colour, sound, capture date and location are kept.",
+  "• The smaller file is re-encoded at a visually lossless setting. A re-encode can never be bit-for-bit identical to the original; the aim is a difference you can't see when watching.",
   "• If re-encoding would not make a file smaller, I send your original back.",
 ].join("\n");
+
+/** Shown under the menu of buttons. Kept in step with `TEXT_CHOOSE` in `video_convertor_bot/bot.py`. */
+export const TEXT_CHOOSE = [
+  "What should I make from this video?",
+  "",
+  "🗜 Smaller: the same video, HEVC, looks the same.",
+  "📐 720p / 480p: scaled down, never up.",
+  "📱 MP4 (H.264): plays on almost any device.",
+  "🎞 GIF: the first 10 seconds, up to 480 px.",
+  "🎵 Audio: just the sound, as M4A or MP3.",
+].join("\n");
+export const TEXT_CHOICE_EXPIRED = "I can't find the video for this button any more. Send the video again.";
+export const TEXT_BUSY = "This video is already being converted.";
+export const TEXT_NO_AUDIO = "This video has no sound, so there is no audio to save.";
 
 export const TEXT_CLOUD_LIMITS =
   `\n\nLimits on the standard Telegram server: I can receive files up to ${CLOUD_DOWNLOAD_LIMIT_MB} MB ` +
@@ -57,6 +78,7 @@ export function formatDuration(seconds: number): string {
 }
 
 export interface ResultTextInput {
+  conversion: Conversion;
   usedOriginal: boolean;
   reason: string;
   sourceBytes: number;
@@ -68,7 +90,12 @@ export interface ResultTextInput {
   isHdr: boolean;
 }
 
+/**
+ * The message shown under the file that is sent back. A port of `describe_result` in
+ * `video_convertor_bot/captions.py`.
+ */
 export function describeResult(result: ResultTextInput): string {
+  const conversion = result.conversion;
   const size =
     result.width && result.height
       ? `${result.width}×${result.height}${result.duration ? ` · ${formatDuration(result.duration)}` : ""}`
@@ -77,9 +104,37 @@ export function describeResult(result: ResultTextInput): string {
   if (result.usedOriginal) {
     return `ℹ️ Sending your original (${formatMb(result.sourceBytes)}): ${result.reason}.${size ? `\n${size}` : ""}`;
   }
-  const depth = result.isHdr ? "10-bit HDR" : "HEVC";
+
+  if (conversion.kind === "gif") {
+    const limit = conversion.maxSeconds ?? 0;
+    const whole = (result.duration ?? 0) <= limit;
+    const part = whole ? "Whole video" : `First ${Math.trunc(limit)} seconds`;
+    return (
+      `✅ GIF, ${formatMb(result.outputBytes)} (video was ${formatMb(result.sourceBytes)})\n` +
+      `${part} · up to 480px`
+    );
+  }
+
+  if (conversion.kind === "audio") {
+    return (
+      `✅ ${conversion.title}, ${formatMb(result.outputBytes)} ` +
+      `(video was ${formatMb(result.sourceBytes)})\n${formatDuration(result.duration ?? 0)}`
+    );
+  }
+
+  const change =
+    result.savedPercent >= 0 ? `${Math.round(result.savedPercent)}% smaller` : `${Math.round(-result.savedPercent)}% bigger`;
   return (
-    `✅ ${formatMb(result.outputBytes)} (was ${formatMb(result.sourceBytes)}, ` +
-    `${Math.round(result.savedPercent)}% smaller)\n${size ? `${size} · ` : ""}HEVC ${depth}`
+    `✅ ${formatMb(result.outputBytes)} (was ${formatMb(result.sourceBytes)}, ${change})\n` +
+    `${size ? `${size} · ` : ""}${videoDepth(conversion, result.isHdr)}`
   );
+}
+
+/**
+ * How the sent file is encoded. The app does not record the output's bit depth, so HEVC is
+ * described by its HDR flag alone, as it has always been.
+ */
+function videoDepth(conversion: Conversion, sourceIsHdr: boolean): string {
+  if (conversion.codec === "h264") return "H.264 8-bit" + (sourceIsHdr ? " · HDR converted to SDR" : "");
+  return sourceIsHdr ? "HEVC 10-bit HDR" : "HEVC";
 }

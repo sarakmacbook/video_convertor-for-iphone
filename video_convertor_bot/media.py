@@ -19,6 +19,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
+from .conversions import DEFAULT_CONVERSION, GIF_MAX_SECONDS, GIF_MAX_SIDE, Conversion
+
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float], Awaitable[None]]
@@ -37,6 +39,10 @@ class NotAVideoError(MediaError):
 
 class ProbeError(MediaError):
     """ffprobe could not read the file."""
+
+
+class NoAudioError(MediaError):
+    """The video has no sound track, so there is nothing to save as audio."""
 
 
 class EncodeError(MediaError):
@@ -253,20 +259,64 @@ def _output_pix_fmt(info: VideoInfo) -> str:
     return "yuv420p10le" if info.bit_depth >= 10 else "yuv420p"
 
 
-def build_encode_command(src: Path, dst: Path, info: VideoInfo, opts: EncodeOptions) -> list[str]:
-    """Build the ffmpeg argument list for a quality-preserving HEVC encode."""
+# The HEVC command is unchanged from before; the other conversions get their own builders.
+HDR_TO_SDR_CHAIN = (
+    "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+    "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+)
+
+
+def _scale_short_side(limit: int) -> str:
+    """Shrink so the shorter side is at most `limit`, in either orientation. Never upscales."""
+    return f"scale=w='if(gt(iw,ih),-2,min(iw,{limit}))':h='if(gt(iw,ih),min(ih,{limit}),-2)'"
+
+
+def _scale_longest_side(limit: int) -> str:
+    """Shrink so the longer side is at most `limit`. Never upscales."""
+    return f"scale=w='if(gt(iw,ih),min(iw,{limit}),-2)':h='if(gt(iw,ih),-2,min(ih,{limit}))'"
+
+
+def _ffmpeg_head(src: Path, opts: EncodeOptions) -> list[str]:
+    return [opts.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", str(src)]
+
+
+def _progress_tail(dst: Path) -> list[str]:
+    return ["-progress", "pipe:1", "-nostats", str(dst)]
+
+
+def build_convert_command(
+    src: Path,
+    dst: Path,
+    info: VideoInfo,
+    opts: EncodeOptions,
+    conversion: Conversion = DEFAULT_CONVERSION,
+) -> list[str]:
+    """Build the ffmpeg argument list for one conversion (see `video_convertor_bot.conversions`)."""
     if not info.has_video:
         raise NotAVideoError("no video track to encode")
+    if conversion.kind == "audio":
+        return _audio_command(src, dst, info, opts, conversion)
+    if conversion.kind == "gif":
+        return _gif_command(src, dst, opts)
+    return _video_command(src, dst, info, opts, conversion)
 
-    cmd = [
-        opts.ffmpeg,
-        "-hide_banner",
-        "-nostdin",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(src),
+
+def build_encode_command(src: Path, dst: Path, info: VideoInfo, opts: EncodeOptions) -> list[str]:
+    """Build the ffmpeg argument list for a quality-preserving HEVC encode."""
+    return build_convert_command(src, dst, info, opts, DEFAULT_CONVERSION)
+
+
+def _video_command(src: Path, dst: Path, info: VideoInfo, opts: EncodeOptions, conversion: Conversion) -> list[str]:
+    hevc = conversion.codec == "hevc"
+    # H.264 here is 8-bit SDR. An HDR source is tone-mapped, or it would come out washed out.
+    to_sdr = not hevc and info.is_hdr
+    filters: list[str] = []
+    if to_sdr:
+        filters.append(HDR_TO_SDR_CHAIN)
+    if conversion.short_side:
+        filters.append(_scale_short_side(conversion.short_side))
+
+    cmd = _ffmpeg_head(src, opts) + [
         # First real video track (skips cover art) and first audio track, if any.
         "-map",
         "0:V:0",
@@ -277,30 +327,38 @@ def build_encode_command(src: Path, dst: Path, info: VideoInfo, opts: EncodeOpti
         "0",
         "-map_chapters",
         "0",
-        # Video: HEVC at a constant-quality setting. Resolution and frame rate are not changed.
+        # Video at a constant-quality setting. Frame rate is never changed.
         "-c:v",
-        "libx265",
+        "libx265" if hevc else "libx264",
         "-preset",
         opts.preset,
         "-crf",
         str(opts.crf),
         "-pix_fmt",
-        _output_pix_fmt(info),
-        "-tag:v",
-        "hvc1",  # lets Apple devices play the HEVC stream
-        "-x265-params",
-        "log-level=error",
-        "-fps_mode",
-        "passthrough",  # never duplicate or drop frames
+        _output_pix_fmt(info) if hevc else "yuv420p",
     ]
+    if hevc:
+        cmd += ["-tag:v", "hvc1", "-x265-params", "log-level=error"]  # hvc1 lets Apple devices play it
+    if filters:
+        cmd += ["-vf", ",".join(filters)]
+    cmd += ["-fps_mode", "passthrough"]  # never duplicate or drop frames
 
-    # Carry the HDR / colour description across unchanged.
-    for flag, value in (
-        ("-color_primaries", info.color_primaries),
-        ("-color_trc", info.color_transfer),
-        ("-colorspace", info.color_space),
-        ("-color_range", info.color_range),
-    ):
+    # Carry the HDR / colour description across unchanged, or label the tone-mapped result as SDR.
+    if to_sdr:
+        colour = [
+            ("-color_primaries", "bt709"),
+            ("-color_trc", "bt709"),
+            ("-colorspace", "bt709"),
+            ("-color_range", "tv"),
+        ]
+    else:
+        colour = [
+            ("-color_primaries", info.color_primaries),
+            ("-color_trc", info.color_transfer),
+            ("-colorspace", info.color_space),
+            ("-color_range", info.color_range),
+        ]
+    for flag, value in colour:
         if value:
             cmd += [flag, value]
 
@@ -309,15 +367,49 @@ def build_encode_command(src: Path, dst: Path, info: VideoInfo, opts: EncodeOpti
     elif info.audio_codec:
         cmd += ["-c:a", "aac", "-b:a", opts.audio_bitrate]
 
-    cmd += [
-        "-movflags",
-        "+faststart+use_metadata_tags",
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        str(dst),
-    ]
+    cmd += ["-movflags", "+faststart+use_metadata_tags", *_progress_tail(dst)]
     return cmd
+
+
+def _gif_command(src: Path, dst: Path, opts: EncodeOptions) -> list[str]:
+    # One palette for the whole clip (palettegen) gives much better colour than the default GIF palette.
+    graph = (
+        f"[0:V:0]fps=12,{_scale_longest_side(GIF_MAX_SIDE)},split[a][b];"
+        "[a]palettegen=stats_mode=diff[p];"
+        "[b][p]paletteuse=dither=sierra2_4a"
+    )
+    return _ffmpeg_head(src, opts) + [
+        "-filter_complex",
+        graph,
+        "-an",
+        "-t",
+        str(GIF_MAX_SECONDS),
+        "-loop",
+        "0",
+        *_progress_tail(dst),
+    ]
+
+
+def _audio_command(src: Path, dst: Path, info: VideoInfo, opts: EncodeOptions, conversion: Conversion) -> list[str]:
+    if not info.audio_codec:
+        raise NoAudioError("this video has no sound to save")
+    if conversion.codec == "mp3":
+        codec = ["-c:a", "libmp3lame", "-b:a", "192k"]
+    elif info.audio_codec == "aac":
+        codec = ["-c:a", "copy"]  # no quality loss at all
+    else:
+        codec = ["-c:a", "aac", "-b:a", opts.audio_bitrate]
+    movflags = ["-movflags", "+faststart"] if conversion.extension == ".m4a" else []
+    return _ffmpeg_head(src, opts) + [
+        "-vn",
+        "-map",
+        "0:a:0",
+        *codec,
+        "-map_metadata",
+        "0",
+        *movflags,
+        *_progress_tail(dst),
+    ]
 
 
 def parse_progress_fraction(line: str, duration: float) -> float | None:
@@ -402,15 +494,34 @@ async def run_encode(
 # --------------------------------------------------------------------------- #
 
 
-def verify_output(source: VideoInfo, output: VideoInfo) -> list[str]:
+def verify_output(
+    source: VideoInfo,
+    output: VideoInfo,
+    conversion: Conversion = DEFAULT_CONVERSION,
+) -> list[str]:
     """Compare the converted file with the original. An empty list means it looks right."""
+    if conversion.kind == "audio":
+        return _verify_audio(source, output, conversion)
+    if conversion.kind == "gif":
+        return _verify_gif(output)
+    return _verify_video(source, output, conversion)
+
+
+def _verify_video(source: VideoInfo, output: VideoInfo, conversion: Conversion) -> list[str]:
     if not output.has_video:
         return ["converted file has no video"]
 
     problems: list[str] = []
-    if output.codec != "hevc":
-        problems.append(f"codec is {output.codec}, expected hevc")
-    if (output.display_width, output.display_height) != (source.display_width, source.display_height):
+    if output.codec != conversion.codec:
+        problems.append(f"codec is {output.codec}, expected {conversion.codec}")
+    if conversion.short_side:
+        wanted = min(min(source.display_width, source.display_height), conversion.short_side)
+        got = min(output.display_width, output.display_height)
+        if abs(got - wanted) > 2:
+            problems.append(f"shorter side is {got}px, expected about {wanted}px")
+        if abs(output.display_width / output.display_height - source.display_width / source.display_height) > 0.02:
+            problems.append("picture shape changed")
+    elif (output.display_width, output.display_height) != (source.display_width, source.display_height):
         problems.append(
             f"resolution changed from {source.display_width}x{source.display_height} "
             f"to {output.display_width}x{output.display_height}"
@@ -419,12 +530,33 @@ def verify_output(source: VideoInfo, output: VideoInfo) -> list[str]:
         problems.append("duration changed")
     if source.fps and output.fps and abs(source.fps - output.fps) > 0.01:
         problems.append("frame rate changed")
-    if output.bit_depth < min(source.bit_depth, 10):
-        problems.append("bit depth dropped")
-    if source.color_transfer and output.color_transfer != source.color_transfer:
-        problems.append("colour transfer changed")
+    if conversion.codec == "hevc":  # H.264 output is 8-bit SDR on purpose, so only HEVC keeps depth and colour
+        if output.bit_depth < min(source.bit_depth, 10):
+            problems.append("bit depth dropped")
+        if source.color_transfer and output.color_transfer != source.color_transfer:
+            problems.append("colour transfer changed")
     if source.audio_codec and not output.audio_codec:
         problems.append("audio track missing")
+    return problems
+
+
+def _verify_gif(output: VideoInfo) -> list[str]:
+    # Duration is not checked: ffprobe often cannot report one for a GIF.
+    if output.codec != "gif":
+        return [f"codec is {output.codec}, expected gif"]
+    if max(output.width, output.height) > GIF_MAX_SIDE:
+        return [f"GIF is {output.width}x{output.height}, larger than {GIF_MAX_SIDE}px"]
+    return []
+
+
+def _verify_audio(source: VideoInfo, output: VideoInfo, conversion: Conversion) -> list[str]:
+    problems: list[str] = []
+    if output.audio_codec != conversion.codec:
+        problems.append(f"audio is {output.audio_codec}, expected {conversion.codec}")
+    if source.duration > 0 and output.duration > 0 and abs(output.duration - source.duration) > max(
+        0.5, source.duration * 0.02
+    ):
+        problems.append("duration changed")
     return problems
 
 

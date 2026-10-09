@@ -26,9 +26,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { loadEnvFile } from "./env";
+import { getConversion, type Conversion } from "@/lib/conversions";
 import { convertFile, savedPercent } from "@/lib/encoding/pipeline";
 import { ffmpegStatus, type VideoInfo } from "@/lib/encoding/ffmpeg";
 import { TelegramClient } from "@/lib/telegram/api";
+import { sendResult } from "@/lib/telegram/send";
 import { describeResult } from "@/lib/telegram/texts";
 import type { ClaimJobPayload, ClaimResponse } from "@/lib/worker/protocol";
 
@@ -147,11 +149,17 @@ async function download(url: string, target: string): Promise<number> {
   return (await stat(target)).size;
 }
 
-async function upload(url: string, method: string, headers: Record<string, string>, file: string): Promise<void> {
-  const blob = await openAsBlob(file, { type: "video/mp4" });
+async function upload(
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  file: string,
+  contentType: string,
+): Promise<void> {
+  const blob = await openAsBlob(file, { type: contentType });
   const response = await fetch(url, {
     method: method || "PUT",
-    headers: { "content-type": "video/mp4", ...headers },
+    headers: { "content-type": contentType, ...headers },
     body: blob,
     duplex: "half",
   } as RequestInit & { duplex: "half" });
@@ -166,6 +174,8 @@ interface JobResult {
   outputKey: string | null;
   outputName: string;
   output: VideoInfo | null;
+  /** The codec of the result: the video's, or the audio or GIF codec the user asked for. */
+  outputCodec: string;
   source: VideoInfo;
   sourceBytes: number;
   ffmpegVersion: string | null;
@@ -199,10 +209,12 @@ async function convertClaimed(options: Options, job: ClaimJobPayload, workDir: s
 
   report(options, job, { stage: "converting", progress: 0.05, message: "Converting" });
   let lastReport = 0;
+  const conversion = getConversion(job.encoding.conversion);
 
   const result = await convertFile(inputPath, {
     workDir: path.join(workDir, "out"),
     outName: job.output.name,
+    conversion,
     crf: job.encoding.crf,
     preset: job.encoding.preset,
     timeoutSeconds: job.encoding.timeoutSeconds,
@@ -223,13 +235,14 @@ async function convertClaimed(options: Options, job: ClaimJobPayload, workDir: s
   let outputKey: string | null = null;
   if (!result.usedOriginal) {
     report(options, job, { stage: "uploading", progress: 0.92, message: "Uploading the result" });
-    await upload(job.output.uploadUrl, job.output.method, job.output.headers, result.outputPath);
+    await upload(job.output.uploadUrl, job.output.method, job.output.headers, result.outputPath, job.output.contentType);
     outputKey = job.output.key;
   }
 
   let deliveredToTelegram = false;
   if (job.delivery.mode === "worker" && job.delivery.telegram) {
     deliveredToTelegram = await deliver(options, job, result.usedOriginal ? inputPath : result.outputPath, {
+      conversion,
       usedOriginal: result.usedOriginal,
       source: result.source,
       output: result.output,
@@ -246,6 +259,7 @@ async function convertClaimed(options: Options, job: ClaimJobPayload, workDir: s
     outputKey,
     outputName: job.output.name,
     output: result.output,
+    outputCodec: result.output?.codec ?? conversion.codec,
     source: result.source,
     sourceBytes: result.sourceBytes,
     ffmpegVersion: version,
@@ -259,6 +273,7 @@ async function deliver(
   job: ClaimJobPayload,
   filePath: string,
   result: {
+    conversion: Conversion;
     usedOriginal: boolean;
     source: VideoInfo;
     output: VideoInfo | null;
@@ -278,6 +293,7 @@ async function deliver(
   const client = new TelegramClient({ token, apiUrl: telegram.apiUrl, localMode: telegram.localMode });
   const info = result.output ?? result.source;
   const caption = describeResult({
+    conversion: result.conversion,
     usedOriginal: result.usedOriginal,
     reason: result.reason,
     sourceBytes: result.sourceBytes,
@@ -290,16 +306,16 @@ async function deliver(
   });
 
   try {
-    if (result.usedOriginal) {
-      await client.sendDocument(telegram.chatId, filePath, { caption });
-    } else {
-      await client.sendVideo(telegram.chatId, filePath, {
-        caption,
-        width: info.width,
-        height: info.height,
-        duration: info.duration,
-      });
-    }
+    await sendResult(client, {
+      chatId: telegram.chatId,
+      filePath,
+      conversion: result.conversion,
+      usedOriginal: result.usedOriginal,
+      caption,
+      width: info.width,
+      height: info.height,
+      duration: info.duration,
+    });
     if (telegram.statusMessageId) {
       await client.editMessageText(telegram.chatId, telegram.statusMessageId, "✅ Done").catch(() => undefined);
     }
@@ -354,7 +370,7 @@ async function runJob(options: Options, job: ClaimJobPayload, version: string | 
         outputBytes: result.outputBytes,
         outputWidth: result.output?.width ?? result.source.width,
         outputHeight: result.output?.height ?? result.source.height,
-        outputCodec: result.output?.codec ?? "hevc",
+        outputCodec: result.outputCodec,
         sourceBytes: result.sourceBytes,
         savedPercent: savedPercent(result.sourceBytes, result.outputBytes, result.usedOriginal),
         ffmpegVersion: result.ffmpegVersion,

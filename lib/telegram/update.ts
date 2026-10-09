@@ -32,7 +32,7 @@ export interface TelegramMedia {
 }
 
 export interface ParsedUpdate {
-  kind: "start" | "help" | "media" | "other";
+  kind: "start" | "help" | "media" | "callback" | "other";
   chatId: number | null;
   chatType: string | null;
   userId: number | null;
@@ -41,6 +41,25 @@ export interface ParsedUpdate {
   media: TelegramMedia | null;
   /** True for messages sent as a compressed Photo/Video, which Telegram re-encoded. */
   compressed: boolean;
+  /** Set for a press on a button of the conversion menu. */
+  callback: CallbackPress | null;
+}
+
+/**
+ * A press on a button of the conversion menu. The menu is a reply to the video it is about, so
+ * the video comes back with the press (`message.reply_to_message`): nothing has to be stored
+ * between the two updates, which matters on a serverless host.
+ */
+export interface CallbackPress {
+  id: string;
+  data: string | null;
+  fromId: number | null;
+  /** The menu message: the bot's own message with the buttons on it. */
+  menuMessageId: number;
+  /** The video that the menu is about, when Telegram still has it. */
+  uploadMessageId: number | null;
+  upload: TelegramMedia | null;
+  uploadFromId: number | null;
 }
 
 interface RawFile {
@@ -67,10 +86,24 @@ interface RawMessage {
   photo?: RawFile[];
   video_note?: RawFile;
   caption?: string;
+  reply_to_message?: RawMessage;
+}
+
+interface RawCallbackQuery {
+  id?: string;
+  data?: string;
+  from?: { id?: number };
+  message?: RawMessage;
 }
 
 export function parseUpdate(update: unknown): ParsedUpdate {
-  const raw = (update ?? {}) as { message?: RawMessage; edited_message?: RawMessage };
+  const raw = (update ?? {}) as {
+    message?: RawMessage;
+    edited_message?: RawMessage;
+    callback_query?: RawCallbackQuery;
+  };
+  if (raw.callback_query) return parseCallback(raw.callback_query);
+
   const message = raw.message ?? raw.edited_message ?? null;
 
   const base: ParsedUpdate = {
@@ -82,6 +115,7 @@ export function parseUpdate(update: unknown): ParsedUpdate {
     text: message?.text ?? null,
     media: null,
     compressed: false,
+    callback: null,
   };
   if (!message) return base;
 
@@ -89,23 +123,57 @@ export function parseUpdate(update: unknown): ParsedUpdate {
   if (text.startsWith("/start")) return { ...base, kind: "start" };
   if (text.startsWith("/help")) return { ...base, kind: "help" };
 
+  const found = mediaFromMessage(message);
+  if (found) return { ...base, kind: "media", media: found.media, compressed: found.compressed };
+  return base;
+}
+
+/** The video in a message, if it has one we can convert. A photo is never the original video. */
+function mediaFromMessage(message: RawMessage): { media: TelegramMedia; compressed: boolean } | null {
   if (message.video) {
-    return { ...base, kind: "media", compressed: true, media: mediaFrom(message.video, false) };
+    return wrapMedia(mediaFrom(message.video, false), true);
   }
   if (message.document && looksLikeVideo(message.document)) {
-    return { ...base, kind: "media", media: mediaFrom(message.document, true) };
+    return wrapMedia(mediaFrom(message.document, true), false);
   }
   if (message.animation) {
-    return { ...base, kind: "media", compressed: true, media: mediaFrom(message.animation, false) };
+    return wrapMedia(mediaFrom(message.animation, false), true);
   }
   if (message.video_note) {
-    return { ...base, kind: "media", compressed: true, media: mediaFrom(message.video_note, false) };
+    return wrapMedia(mediaFrom(message.video_note, false), true);
   }
-  if (message.photo?.length) {
-    // A photo is never the original video: tell the user to send a File instead.
-    return { ...base, kind: "other" };
-  }
-  return base;
+  return null;
+}
+
+function wrapMedia(media: TelegramMedia | null, compressed: boolean): { media: TelegramMedia; compressed: boolean } | null {
+  return media ? { media, compressed } : null;
+}
+
+function parseCallback(query: RawCallbackQuery): ParsedUpdate {
+  const menu = query.message ?? null;
+  const upload = menu?.reply_to_message ?? null;
+  const found = upload ? mediaFromMessage(upload) : null;
+  return {
+    kind: "callback",
+    chatId: menu?.chat?.id ?? null,
+    chatType: menu?.chat?.type ?? null,
+    userId: query.from?.id ?? null,
+    messageId: menu?.message_id ?? null,
+    text: null,
+    media: null,
+    compressed: false,
+    callback: query.id
+      ? {
+          id: query.id,
+          data: query.data ?? null,
+          fromId: query.from?.id ?? null,
+          menuMessageId: menu?.message_id ?? 0,
+          uploadMessageId: upload?.message_id ?? null,
+          upload: found?.media ?? null,
+          uploadFromId: upload?.from?.id ?? null,
+        }
+      : null,
+  };
 }
 
 function mediaFrom(file: RawFile, isDocument: boolean): TelegramMedia | null {

@@ -1,18 +1,20 @@
-"""Turn one downloaded video into the smallest file that still looks like the original."""
+"""Turn one downloaded video into the file the user asked for, and check it before it is sent."""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from .conversions import DEFAULT_CONVERSION, Conversion, effective_seconds
 from .media import (
+    EncodeError,
     EncodeOptions,
     NotAVideoError,
     ProbeError,
     ProgressCallback,
     VideoInfo,
-    build_encode_command,
+    build_convert_command,
     probe,
     run_encode,
     verify_output,
@@ -32,6 +34,7 @@ class ConversionResult:
     used_original: bool
     reason: str
     output: VideoInfo | None = None  # probe of the converted file, when one was made
+    conversion: Conversion = field(default=DEFAULT_CONVERSION)
 
     @property
     def delivered_bytes(self) -> int:
@@ -61,12 +64,17 @@ async def convert_video(
     out_name: str,
     opts: EncodeOptions,
     progress: ProgressCallback | None = None,
+    conversion: Conversion = DEFAULT_CONVERSION,
 ) -> ConversionResult:
     """Convert `src` into `work_dir/out/<out_name>` and check the result.
 
-    Raises ProbeError / NotAVideoError / EncodeError for problems the user should hear about.
-    If the converted file is not clearly better (bigger, or it fails the checks), the original
-    is returned instead so the user never gets something worse than what they sent.
+    Raises ProbeError / NotAVideoError / NoAudioError / EncodeError for problems the user should
+    hear about.
+
+    For the smaller-file conversions, if the result is not clearly better (bigger, or it fails the
+    checks) the original is returned instead, so the user never gets something worse than what
+    they sent. Format conversions (MP4 for any device, GIF, audio) always return the converted
+    file, or raise EncodeError when it fails its checks, because the user asked for that format.
     """
     source = await probe(src, opts)
     if not source.has_video:
@@ -78,7 +86,7 @@ async def convert_video(
     dst = out_dir / out_name
 
     logger.info(
-        "converting %dx%d %s %.1fs (%s-bit, %s, audio=%s), crf=%d preset=%s",
+        "converting %dx%d %s %.1fs (%s-bit, %s, audio=%s) to %s, crf=%d preset=%s",
         source.display_width,
         source.display_height,
         source.codec,
@@ -86,12 +94,13 @@ async def convert_video(
         source.bit_depth,
         "HDR" if source.is_hdr else "SDR",
         source.audio_codec,
+        conversion.key,
         opts.crf,
         opts.preset,
     )
     await run_encode(
-        build_encode_command(src, dst, source, opts),
-        duration=source.duration,
+        build_convert_command(src, dst, source, opts, conversion),
+        duration=effective_seconds(conversion, source.duration),
         timeout_seconds=opts.timeout_seconds,
         log_path=out_dir / ENCODE_LOG_NAME,
         on_progress=progress,
@@ -105,12 +114,28 @@ async def convert_video(
     else:
         try:
             output_info = await probe(dst, opts)
-            problems = verify_output(source, output_info)
+            problems = verify_output(source, output_info, conversion)
         except ProbeError as exc:
             problems = [f"converted file could not be read ({exc})"]
 
     if problems:
         logger.warning("converted file failed checks: %s", "; ".join(problems))
+
+    if not conversion.keeps_original_if_larger:
+        if problems:
+            raise EncodeError(f"the converted file failed its checks: {'; '.join(problems)}")
+        logger.info("converted %d -> %d bytes as %s", source_bytes, output_bytes, conversion.key)
+        return ConversionResult(
+            source=source,
+            source_bytes=source_bytes,
+            output_path=dst,
+            output_bytes=output_bytes,
+            used_original=False,
+            reason="converted",
+            output=output_info,
+            conversion=conversion,
+        )
+
     use_original, reason = decide(source_bytes, output_bytes, problems)
     if use_original:
         logger.info("sending original: %s", reason)
@@ -124,6 +149,7 @@ async def convert_video(
             used_original=True,
             reason=reason,
             output=output_info,
+            conversion=conversion,
         )
 
     logger.info(
@@ -140,4 +166,5 @@ async def convert_video(
         used_original=False,
         reason=reason,
         output=output_info,
+        conversion=conversion,
     )

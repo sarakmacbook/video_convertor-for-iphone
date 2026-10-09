@@ -67,7 +67,7 @@ export async function POST(request: Request) {
         await client.setWebhook({
           url,
           secretToken: secret,
-          allowedUpdates: ["message"],
+          allowedUpdates: ["message", "callback_query"],
           dropPendingUpdates: Boolean(body.dropPendingUpdates),
         });
         const info = await client.getWebhookInfo();
