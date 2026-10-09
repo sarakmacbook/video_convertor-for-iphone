@@ -92,6 +92,21 @@ def test_a_token_in_the_botfather_format_is_accepted(raw):
     assert parse_token(raw) == raw.strip()
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        f"bot{TOKEN}",
+        f'"{TOKEN}"',
+        f"`{TOKEN}`",
+        f"{TOKEN}.",
+        f"\u200b{TOKEN}\u00a0",
+        f"Use this token to access the HTTP API:\n{TOKEN}\nKeep your token secure.",
+    ],
+)
+def test_a_wrapped_or_pasted_token_is_accepted(raw):
+    assert parse_token(raw) == TOKEN
+
+
 @pytest.mark.parametrize("raw", ["", "not-a-token", "123456", "12:has space", "abc:def"])
 def test_a_bad_token_is_refused(raw):
     with pytest.raises(ConnectError, match="does not look like a bot API key"):
@@ -100,6 +115,14 @@ def test_a_bad_token_is_refused(raw):
 
 @pytest.mark.parametrize("raw,expected", [("123456789", 123456789), (" 42 ", 42)])
 def test_a_user_id_is_a_positive_number(raw, expected):
+    assert parse_user_id(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("Id: 555111222\nFirst name: Sara", 555111222), ("Your user id is 555111222", 555111222)],
+)
+def test_a_user_id_is_pulled_out_of_an_id_bot_reply(raw, expected):
     assert parse_user_id(raw) == expected
 
 
@@ -191,6 +214,20 @@ def test_a_key_telegram_rejects_saves_nothing(tmp_path):
 
     assert code == 1
     assert "did not accept this API key" in output
+    assert not env_file.exists()
+
+
+def test_http_200_with_error_code_401_is_a_bad_key(tmp_path):
+    """Telegram sometimes answers HTTP 200 with `{ok: false, error_code: 401}`."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": False, "error_code": 401, "description": "Unauthorized"})
+
+    env_file = tmp_path / ".env"
+    code, output = _run(env_file, ["--user-id", "555"], httpx.MockTransport(handle))
+    assert code == 1
+    assert "did not accept this API key" in output
+    assert "could not reach" not in output
     assert not env_file.exists()
 
 

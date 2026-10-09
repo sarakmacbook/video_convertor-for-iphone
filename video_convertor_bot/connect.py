@@ -20,7 +20,10 @@ from dotenv import dotenv_values, find_dotenv
 from .config import DEFAULT_API_URL
 
 TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]+$")
+TOKEN_IN_TEXT_RE = re.compile(r"\d{3,}:[A-Za-z0-9_-]{8,}")
 USER_ID_RE = re.compile(r"^[1-9]\d{0,14}$")
+USER_ID_LABEL_RE = re.compile(r"(?:(?:user|chat)\s*id|id)\b[^0-9]{0,24}([1-9]\d{4,14})", re.IGNORECASE)
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200d\ufeff\u00a0]")
 _ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 _COMMENTED_ASSIGNMENT_RE = re.compile(r"^\s*#\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
@@ -42,18 +45,39 @@ class ConnectError(Exception):
         self.status = status
 
 
+def _unwrap(raw: str) -> str:
+    text = _INVISIBLE_RE.sub(" ", raw).strip()
+    if len(text) >= 2 and (
+        (text[0] == text[-1] and text[0] in "\"'`") or (text[0] == "<" and text[-1] == ">")
+    ):
+        text = text[1:-1].strip()
+    return text
+
+
 def parse_token(raw: str) -> str:
-    token = raw.strip()
-    if not TOKEN_RE.match(token):
-        raise ConnectError("That does not look like a bot API key. Copy the whole token from @BotFather, e.g. 123456789:AAH…")
-    return token
+    """Accept the bare token, or the same token wrapped in BotFather's message / a `bot` prefix."""
+    text = _unwrap(raw)
+    if text.lower().startswith("bot") and TOKEN_RE.match(text[3:]):
+        text = text[3:]
+    if TOKEN_RE.match(text):
+        return text
+    trimmed = text.rstrip(".,;")
+    if TOKEN_RE.match(trimmed):
+        return trimmed
+    found = TOKEN_IN_TEXT_RE.findall(text)
+    if found:
+        return max(found, key=len)
+    raise ConnectError("That does not look like a bot API key. Copy the whole token from @BotFather, e.g. 123456789:AAH…")
 
 
 def parse_user_id(raw: str) -> int:
-    text = raw.strip()
-    if not USER_ID_RE.match(text):
-        raise ConnectError("The user ID must be a whole number, e.g. 123456789. Ask @userinfobot on Telegram for yours.")
-    return int(text)
+    text = _unwrap(raw)
+    if USER_ID_RE.match(text):
+        return int(text)
+    labeled = USER_ID_LABEL_RE.search(text)
+    if labeled:
+        return int(labeled.group(1))
+    raise ConnectError("The user ID must be a whole number, e.g. 123456789. Ask @userinfobot on Telegram for yours.")
 
 
 def _call(
@@ -77,7 +101,12 @@ def _call(
         data = {}
     if not isinstance(data, dict) or not data.get("ok"):
         description = data.get("description") if isinstance(data, dict) else None
-        raise ConnectError(description or f"Telegram answered HTTP {response.status_code}", response.status_code)
+        error_code = data.get("error_code") if isinstance(data, dict) else None
+        try:
+            status = int(error_code) if error_code else response.status_code
+        except (TypeError, ValueError):
+            status = response.status_code
+        raise ConnectError(description or f"Telegram answered HTTP {response.status_code}", status)
     return data.get("result")
 
 
@@ -91,8 +120,9 @@ def check_token(token: str, api_url: str, *, transport: httpx.BaseTransport | No
         try:
             me = _call(client, api_url, token, "getMe")
         except ConnectError as exc:
-            # Telegram answers 401 for a wrong key. A local Bot API server may answer 404.
-            if exc.status in (401, 404):
+            # Telegram answers 401 for a wrong key (sometimes as HTTP 200 + error_code 401).
+            # A local Bot API server may answer 404.
+            if exc.status in (401, 404) or "unauthorized" in str(exc).lower():
                 raise ConnectError("Telegram did not accept this API key. Check it in @BotFather (/token) and try again.") from None
             raise
     if not isinstance(me, dict):

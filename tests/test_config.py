@@ -38,6 +38,11 @@ def test_malformed_token_is_rejected(token):
         load_settings({"BOT_TOKEN": token})
 
 
+def test_a_bot_prefix_on_the_token_is_stripped():
+    s = load_settings({"BOT_TOKEN": f"bot{TOKEN}"})
+    assert s.bot_token == TOKEN
+
+
 @pytest.mark.parametrize("value", ["99", "-1", "abc"])
 def test_crf_must_be_a_valid_number(value):
     with pytest.raises(ConfigError, match="CRF"):

@@ -14,6 +14,8 @@
 
 import { z } from "zod";
 
+import { parseBotToken } from "@/lib/telegram/connect";
+
 export const X265_PRESETS = [
   "ultrafast",
   "superfast",
@@ -163,7 +165,7 @@ export function defaultSettings(envSettings: EnvSettings = loadEnvSettings()): R
     inlineSpeedFactor: 0.4,
     workerMaxAttempts: 3,
     jobRetentionDays: 7,
-    telegramBotToken: env(DEFAULT_BOT_TOKEN_ENV),
+    telegramBotToken: parseBotToken(env(DEFAULT_BOT_TOKEN_ENV)) || env(DEFAULT_BOT_TOKEN_ENV),
     telegramWebhookSecret: env("TELEGRAM_WEBHOOK_SECRET") || "",
     telegramApiUrl,
     telegramLocalMode,
@@ -247,8 +249,12 @@ export function maskSecret(value: string): string {
 
 /** Coerce one raw string (from the database) into the typed setting. */
 export function coerceOverride(key: OverridableKey, raw: string): string | number {
+  const cleaned = key === "telegram_bot_token" ? parseBotToken(raw) ?? raw.trim() : raw;
+  if (key === "telegram_bot_token" && !parseBotToken(cleaned)) {
+    throw new Error("Invalid value for telegram_bot_token: that does not look like a Telegram bot token");
+  }
   const schema = overridableSettings[key];
-  const result = schema.safeParse(raw);
+  const result = schema.safeParse(cleaned);
   if (!result.success) {
     throw new Error(`Invalid value for ${key}: ${result.error.issues[0]?.message ?? "not valid"}`);
   }
@@ -307,7 +313,7 @@ function applyOverride(values: RuntimeSettings, key: OverridableKey, value: stri
       values.jobRetentionDays = Number(value);
       break;
     case "telegram_bot_token":
-      values.telegramBotToken = String(value);
+      values.telegramBotToken = parseBotToken(String(value)) || String(value);
       break;
     case "telegram_webhook_secret":
       values.telegramWebhookSecret = String(value);

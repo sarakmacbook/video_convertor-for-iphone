@@ -380,7 +380,7 @@ describe("the settings page", () => {
     });
 
     expect(await screen.findByText(/Connected @my_convertor_bot for user 555\. The webhook is set\./)).toBeTruthy();
-    expect(connects).toEqual([{ token: "123456789:AAHsecret", userId: "555" }]);
+    expect(connects).toEqual([{ token: "123456789:AAHsecret", userId: 555 }]);
     expect(hooks).toEqual([expect.objectContaining({ action: "set" })]);
     expect(token.value).toBe(""); // the key is not kept in the page after it is saved
   });

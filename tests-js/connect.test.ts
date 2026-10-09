@@ -29,6 +29,24 @@ describe("parsing the API key and user ID", () => {
     expect(parseBotToken(`  ${TOKEN}\n`)).toBe(TOKEN);
   });
 
+  it("strips a leading bot prefix, quotes, a trailing period and invisible characters", () => {
+    expect(parseBotToken(`bot${TOKEN}`)).toBe(TOKEN);
+    expect(parseBotToken(`"${TOKEN}"`)).toBe(TOKEN);
+    expect(parseBotToken(`\`${TOKEN}\``)).toBe(TOKEN);
+    expect(parseBotToken(`${TOKEN}.`)).toBe(TOKEN);
+    expect(parseBotToken(`\u200B${TOKEN}\u00A0`)).toBe(TOKEN);
+  });
+
+  it("pulls the token out of the message @BotFather actually sends", () => {
+    const paste = [
+      "Done! Congratulations on your new bot. You will find it at t.me/test_converter_bot.",
+      "Use this token to access the HTTP API:",
+      TOKEN,
+      "Keep your token secure and store it safely.",
+    ].join("\n");
+    expect(parseBotToken(paste)).toBe(TOKEN);
+  });
+
   it.each([["not-a-token"], ["123456"], ["12:has space"], [""], [null], [42]])("rejects %j", (raw) => {
     expect(parseBotToken(raw)).toBeNull();
   });
@@ -37,6 +55,11 @@ describe("parsing the API key and user ID", () => {
     expect(parseUserId("123456789")).toBe(123456789);
     expect(parseUserId(" 42 ")).toBe(42);
     expect(parseUserId(42)).toBe(42);
+  });
+
+  it("pulls the id out of an @userinfobot reply", () => {
+    expect(parseUserId("Id: 555111222\nFirst name: Sara")).toBe(555111222);
+    expect(parseUserId("Your user id is 555111222")).toBe(555111222);
   });
 
   it.each([["0"], ["-5"], ["12.5"], ["alice"], ["1,2"], [""], ["0123"], ["9999999999999999"]])(
@@ -106,6 +129,40 @@ describe("POST /api/telegram/connect", () => {
 
     const { values } = await getSettings();
     expect(values.telegramBotToken).not.toBe("999999999:WRONGKEY");
+  });
+
+  it("treats HTTP 200 + error_code 401 as a bad key, not as Telegram being unreachable", async () => {
+    const rejecting = realFetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (String(input).includes("/bot999999999:")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ok: false, error_code: 401, description: "Unauthorized" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return rejecting(input, init);
+    });
+
+    const response = await connectPost(connectRequest({ token: "999999999:WRONGKEY", userId: String(USER_ID) }));
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(response.status).toBe(400);
+    expect(body.error).toMatch(/did not accept this API key/);
+    expect(body.error).not.toMatch(/could not reach/);
+  });
+
+  it("accepts a BotFather paste and a leading bot prefix, and stores the clean token", async () => {
+    const paste = `Use this token to access the HTTP API:\nbot${TOKEN}\nKeep your token secure.`;
+    const response = await connectPost(connectRequest({ token: paste, userId: `Id: ${USER_ID}` }));
+    const body = (await response.json()) as { ok: boolean; userId: number };
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.userId).toBe(USER_ID);
+
+    const { values } = await getSettings();
+    expect(values.telegramBotToken).toBe(TOKEN);
+    expect(values.allowedUserIds).toEqual([USER_ID]);
   });
 
   it("saves the key and the one allowed user, then sends the confirmation", async () => {
