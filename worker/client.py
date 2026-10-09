@@ -58,8 +58,10 @@ class ClaimedJob:
     output_upload_headers: dict[str, str]
     output_key: str
     output_name: str
+    output_content_type: str
     crf: int
     preset: str
+    conversion_key: str
     timeout_seconds: int
     delivery_mode: str
     telegram: dict[str, Any] | None
@@ -93,8 +95,10 @@ class ClaimedJob:
             output_upload_headers=dict(output.get("headers") or {}),
             output_key=str(output.get("key") or ""),
             output_name=str(output.get("name") or "video_small.mp4"),
+            output_content_type=str(output.get("contentType") or "video/mp4"),
             crf=int(encoding.get("crf") or 20),
             preset=str(encoding.get("preset") or "medium"),
+            conversion_key=str(encoding.get("conversion") or "hevc"),
             timeout_seconds=int(encoding.get("timeoutSeconds") or 21600),
             delivery_mode=str(delivery.get("mode") or "server"),
             telegram=_telegram_details(delivery.get("telegram")),
@@ -213,14 +217,21 @@ class WorkerClient:
                 file.write(chunk)
         return target.stat().st_size
 
-    def upload(self, url: str, method: str, headers: dict[str, str], source: Path) -> int:
+    def upload(
+        self,
+        url: str,
+        method: str,
+        headers: dict[str, str],
+        source: Path,
+        content_type: str = "video/mp4",
+    ) -> int:
         size = source.stat().st_size
         with source.open("rb") as file:
             request = urllib.request.Request(url, data=file, method=method or "PUT")
             for key, value in (headers or {}).items():
                 request.add_header(key, value)
             if "content-type" not in {key.lower() for key in (headers or {})}:
-                request.add_header("content-type", "video/mp4")
+                request.add_header("content-type", content_type)
             request.add_header("content-length", str(size))
             try:
                 with urllib.request.urlopen(request, timeout=UPLOAD_TIMEOUT) as response:

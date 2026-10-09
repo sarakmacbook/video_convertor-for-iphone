@@ -195,8 +195,11 @@ Both static builds ship `ffmpeg` only, so the app inspects files with `ffmpeg -i
 2. Open `/settings` → **Telegram** → *Set webhook*. The app generates a secret, stores it, and
    registers `https://<your-domain>/api/telegram/webhook/<secret>` with Telegram. The URL must be
    HTTPS; Telegram rejects anything else.
-3. Send your bot a video **as a File**. Short clips come back converted; longer ones are queued
-   and converted by a worker.
+3. Send your bot a video **as a File**. The bot replies with a menu (smaller HEVC, 720p, 480p,
+   MP4 H.264, GIF, audio). Pick one: short clips come back converted; longer ones are queued and
+   converted by a worker.
+   *If you set the webhook before the menu existed, set it again:* the buttons need Telegram's
+   `callback_query` updates, which the setup now asks for.
 4. *Webhook info* shows what Telegram thinks, including the last error. *Delete webhook* is how
    you go back to polling with `python -m video_convertor_bot` — running both at once is not
    possible, Telegram delivers updates to one place only.

@@ -17,10 +17,12 @@ import { pipeline } from "node:stream/promises";
 import { log } from "@/lib/log";
 import type { RuntimeSettings } from "@/lib/settings/schema";
 import { CLOUD_UPLOAD_LIMIT_MB, LOCAL_SERVER_LIMIT_MB, MB } from "@/lib/settings/schema";
-import { convertedName, type Storage } from "@/lib/storage";
+import type { Storage } from "@/lib/storage";
+import { conversionOfMeta } from "@/lib/conversions";
 import { getJob, setDelivery, type Job } from "@/lib/jobs/service";
 import { deliveryKey } from "@/lib/jobs/downloads";
 import { TelegramClient } from "./api";
+import { sendResult } from "./send";
 import { describeResult, formatMb, TEXT_DONE, TEXT_TOO_LARGE_TO_SEND } from "./texts";
 
 export function telegramConfigured(settings: RuntimeSettings): boolean {
@@ -96,32 +98,33 @@ export async function deliverToTelegram(options: DeliveryOptions): Promise<Deliv
     }
 
     const client = telegramClientFor(options.settings);
+    const conversion = conversionOfMeta(job.meta);
+    const width = job.output_width ?? job.input_width;
+    const height = job.output_height ?? job.input_height;
     const caption = describeResult({
+      conversion,
       usedOriginal: target.kind === "original",
       reason: job.message ?? "",
       sourceBytes: job.input_bytes,
       outputBytes: target.bytes,
       savedPercent: job.saved_percent ?? 0,
-      width: job.output_width ?? job.input_width,
-      height: job.output_height ?? job.input_height,
+      width,
+      height,
       duration: job.input_duration,
       isHdr: job.input_is_hdr === 1,
     });
 
-    if (target.kind === "original") {
-      await client.sendDocument(job.telegram_chat_id, filePath, {
-        caption,
-        replyToMessageId: job.telegram_message_id ?? undefined,
-      });
-    } else {
-      await client.sendVideo(job.telegram_chat_id, filePath, {
-        caption,
-        width: job.output_width ?? job.input_width,
-        height: job.output_height ?? job.input_height,
-        duration: job.input_duration,
-        replyToMessageId: job.telegram_message_id ?? undefined,
-      });
-    }
+    await sendResult(client, {
+      chatId: job.telegram_chat_id,
+      filePath,
+      conversion,
+      usedOriginal: target.kind === "original",
+      caption,
+      replyToMessageId: job.telegram_message_id,
+      width,
+      height,
+      duration: job.input_duration,
+    });
 
     if (job.telegram_status_message_id) {
       await client
@@ -161,4 +164,3 @@ function sanitize(name: string): string {
   return name.replace(/[^A-Za-z0-9._-]+/g, "_").slice(-100) || "video.mp4";
 }
 
-export { convertedName };

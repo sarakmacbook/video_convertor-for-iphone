@@ -2,16 +2,20 @@
  * One conversion: probe the input, re-encode it, check the result, and decide whether the
  * converted file is actually worth sending.
  *
- * A port of `video_convertor_bot/pipeline.py`, kept deliberately close to it: if a check
- * fails or the encode would not save anything, the original file is delivered instead, so the
- * user never gets something worse than what they uploaded.
+ * A port of `video_convertor_bot/pipeline.py`, kept deliberately close to it. For the smaller-file
+ * conversions, if a check fails or the encode would not save anything, the original file is
+ * delivered instead, so the user never gets something worse than what they uploaded. Format
+ * conversions (MP4 for any device, GIF, audio) return the converted file, or fail with an
+ * EncodeError when it does not pass its checks, because the user asked for that format.
  */
 
 import { mkdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
+import { DEFAULT_CONVERSION, effectiveSeconds, type Conversion } from "@/lib/conversions";
+
 import {
-  buildEncodeCommand,
+  buildConvertCommand,
   estimateEncodeSeconds,
   ffmpegStatus,
   hasVideo,
@@ -36,6 +40,7 @@ export interface ConversionResult {
   output: VideoInfo | null;
   problems: string[];
   encodeSeconds: number;
+  conversion: Conversion;
 }
 
 export function decide(sourceBytes: number, outputBytes: number, problems: string[]): [boolean, string] {
@@ -57,9 +62,12 @@ export interface ConvertOptions {
   signal?: AbortSignal;
   ffmpeg?: string;
   ffprobe?: string | null;
+  /** What to make from the video. Defaults to the smaller HEVC file. */
+  conversion?: Conversion;
 }
 
 export async function convertFile(inputPath: string, options: ConvertOptions): Promise<ConversionResult> {
+  const conversion = options.conversion ?? DEFAULT_CONVERSION;
   const status = options.ffmpeg ? null : await ffmpegStatus();
   const ffmpeg = options.ffmpeg ?? status?.path;
   if (!ffmpeg) {
@@ -84,8 +92,8 @@ export async function convertFile(inputPath: string, options: ConvertOptions): P
 
   await options.onProgress?.(0, "converting");
   const started = Date.now();
-  await runEncode(buildEncodeCommand(inputPath, outputPath, source, encodeOptions), {
-    duration: source.duration,
+  await runEncode(buildConvertCommand(inputPath, outputPath, source, encodeOptions, conversion), {
+    duration: effectiveSeconds(conversion, source.duration),
     timeoutSeconds: options.timeoutSeconds,
     logPath: path.join(options.workDir, "ffmpeg.log"),
     onProgress: (fraction) => options.onProgress?.(fraction),
@@ -107,10 +115,29 @@ export async function convertFile(inputPath: string, options: ConvertOptions): P
   } else {
     try {
       output = await probe(outputPath, ffmpeg, ffprobe);
-      problems = verifyOutput(source, output);
+      problems = verifyOutput(source, output, conversion);
     } catch (error) {
       problems = [`converted file could not be read (${(error as ProbeError).message})`];
     }
+  }
+
+  if (!conversion.keepsOriginalIfLarger) {
+    if (problems.length > 0) {
+      await unlink(outputPath).catch(() => undefined);
+      throw new EncodeError(`the converted file failed its checks: ${problems.join("; ")}`);
+    }
+    return {
+      source,
+      sourceBytes,
+      outputPath,
+      outputBytes,
+      usedOriginal: false,
+      reason: "converted",
+      output,
+      problems,
+      encodeSeconds,
+      conversion,
+    };
   }
 
   const [useOriginal, reason] = decide(sourceBytes, outputBytes, problems);
@@ -126,6 +153,7 @@ export async function convertFile(inputPath: string, options: ConvertOptions): P
       output,
       problems,
       encodeSeconds,
+      conversion,
     };
   }
 
@@ -139,6 +167,7 @@ export async function convertFile(inputPath: string, options: ConvertOptions): P
     output,
     problems,
     encodeSeconds,
+    conversion,
   };
 }
 

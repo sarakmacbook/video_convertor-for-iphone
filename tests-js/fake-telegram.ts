@@ -75,7 +75,8 @@ export async function startFakeTelegram(files: Map<string, { path: string; name:
           uploaded.push(filePath);
           body[name] = `FILE:${filePath}`;
         } else {
-          body[name] = value;
+          // Multipart text fields are UTF-8 (captions have emoji); the body was read as latin1 above.
+          body[name] = Buffer.from(value, "latin1").toString("utf8");
         }
       }
     } else {
@@ -100,7 +101,11 @@ export async function startFakeTelegram(files: Map<string, { path: string; name:
       case "editMessageText":
       case "sendVideo":
       case "sendDocument":
+      case "sendAnimation":
+      case "sendAudio":
         return ok({ message_id: 1000 + calls.length, date: Math.floor(Date.now() / 1000), chat: { id: body.chat_id } });
+      case "answerCallbackQuery":
+        return ok(true);
       case "getFile": {
         const fileId = String(body.file_id ?? "");
         const entry = files.get(fileId);

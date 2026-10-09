@@ -7,9 +7,10 @@
  */
 
 import { baseUrl, checkWorkerSecret, fail, handleRouteError, json, readJson, workerSecret } from "@/lib/http";
+import { conversionOfMeta } from "@/lib/conversions";
 import { claimJob, reapStaleJobs, touchWorker } from "@/lib/jobs/service";
 import { getSettings } from "@/lib/settings";
-import { convertedName, getStorage, outputKey } from "@/lib/storage";
+import { conversionName, getStorage, outputKey } from "@/lib/storage";
 import { claimLeaseSeconds, telegramDeliveryMode, type ClaimJobPayload } from "@/lib/worker/protocol";
 
 export const runtime = "nodejs";
@@ -58,11 +59,13 @@ export async function POST(request: Request) {
       }
     }
 
-    const outName = convertedName(job.input_name);
+    // The Telegram bot records what the user picked in the job; web jobs get the smaller HEVC file.
+    const conversion = conversionOfMeta(job.meta);
+    const outName = conversionName(job.input_name, conversion);
     const outKey = outputKey(job.id, outName);
     const outputUpload = await storage.createUploadTarget({
       key: outKey,
-      contentType: "video/mp4",
+      contentType: conversion.mimeType,
       expiresInSeconds: leaseSeconds * 8,
     });
 
@@ -88,8 +91,10 @@ export async function POST(request: Request) {
         headers: outputUpload.headers,
         key: outKey,
         name: outName,
+        contentType: conversion.mimeType,
       },
       encoding: {
+        conversion: conversion.key,
         crf: job.crf ?? settings.crf,
         preset: job.preset ?? settings.preset,
         timeoutSeconds: 6 * 60 * 60,

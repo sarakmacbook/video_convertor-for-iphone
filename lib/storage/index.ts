@@ -2,6 +2,9 @@
  * Picking a storage driver from the environment, and the key layout jobs use.
  */
 
+import type { Conversion } from "@/lib/conversions";
+import { DEFAULT_CONVERSION } from "@/lib/conversions";
+
 import { BlobStorage } from "./blob";
 import { LocalStorage } from "./local";
 import { S3Storage, s3ConfigFromEnv } from "./s3";
@@ -59,7 +62,12 @@ export function sanitizeName(name: string): string {
 
 /** `IMG_1234.MOV` → `IMG_1234_small.mp4`, mirroring the Telegram bot's naming. */
 export function convertedName(inputName: string | null | undefined): string {
+  return conversionName(inputName, DEFAULT_CONVERSION);
+}
+
+/** `IMG_1234.MOV` → `IMG_1234_gif.gif` for a GIF, `IMG_1234_audio.m4a` for audio, and so on. */
+export function conversionName(inputName: string | null | undefined, conversion: Conversion): string {
   const base = sanitizeName(inputName ?? "video.mp4");
   const stem = base.replace(/\.[A-Za-z0-9]{1,8}$/, "") || "video";
-  return `${stem}_small.mp4`;
+  return `${stem}${conversion.nameSuffix}${conversion.extension}`;
 }

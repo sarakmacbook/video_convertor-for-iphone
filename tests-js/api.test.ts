@@ -335,6 +335,36 @@ describe("the web API", () => {
       expect(response.status).toBe(200);
       await settleBackgroundWork();
 
+      // The video only gets the menu at first. Nothing is downloaded until a button is pressed.
+      const menu = fake.lastCall("sendMessage");
+      expect(menu?.body.reply_to_message_id).toBe(77);
+      expect(JSON.stringify(menu?.body.reply_markup)).toContain("conv:hevc");
+      expect(fake.callsTo("getFile")).toHaveLength(0);
+
+      // Press the smaller-HEVC button: the menu message is the one with the buttons.
+      const menuMessageId = 900;
+      const press = await telegramWebhook(
+        jsonRequest("/api/telegram/webhook/webhook-secret", {
+          update_id: 11,
+          callback_query: {
+            id: "cb-1",
+            from: { id: 555, is_bot: false, first_name: "Sam" },
+            data: "conv:hevc",
+            message: {
+              message_id: menuMessageId,
+              date: Math.floor(Date.now() / 1000),
+              chat: { id: 555, type: "private", first_name: "Sam" },
+              from: { id: 424242, is_bot: true, first_name: "Converter" },
+              text: "What should I make from this video?",
+              reply_to_message: update.message,
+            },
+          },
+        }),
+        { params: Promise.resolve({ secret: "webhook-secret" }) },
+      );
+      expect(press.status).toBe(200);
+      await settleBackgroundWork();
+
       // Diagnostics: what did the app record for the job, and what did Telegram see?
       const latest = await getDb().selectFrom("jobs").selectAll().orderBy("created_at", "desc").limit(1).executeTakeFirst();
       if (latest) {

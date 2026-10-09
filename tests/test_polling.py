@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from tests.fake_telegram import FakeBotApi
-from tests.helpers import TEST_TOKEN, message_update
+from tests.helpers import TEST_TOKEN, callback_update, message_update
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -19,18 +19,18 @@ def test_entry_point_polls_and_returns_a_converted_video(tmp_path, ffmpeg_opts, 
     api.start()
     try:
         api.serve_file("poll-vid", original, file_path="videos/file_poll.mp4")
-        api.queue_update(
-            message_update(
-                video={
-                    "file_id": "poll-vid",
-                    "file_unique_id": "u-poll",
-                    "width": 640,
-                    "height": 360,
-                    "duration": 2,
-                    "file_size": len(original),
-                }
-            )
+        video_update = message_update(
+            video={
+                "file_id": "poll-vid",
+                "file_unique_id": "u-poll",
+                "width": 640,
+                "height": 360,
+                "duration": 2,
+                "file_size": len(original),
+            }
         )
+        api.queue_update(video_update)  # the video: the bot answers with the conversion menu
+        api.queue_update(callback_update(video_update["message"], "hevc"))  # and the user taps "Smaller"
 
         env = {
             **os.environ,

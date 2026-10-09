@@ -2,7 +2,8 @@
 
 The actual encoding is done by the bot's existing, tested pipeline
 (`video_convertor_bot.pipeline.convert_video`), so a video converted by the worker and one
-converted by the Telegram bot come out identical.
+converted by the Telegram bot come out identical. The conversion (smaller HEVC, 720p, MP4, GIF,
+audio, ...) is chosen by the user in the bot and travels with the job.
 """
 
 from __future__ import annotations
@@ -14,8 +15,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from video_convertor_bot.conversions import get_conversion
 from video_convertor_bot.media import EncodeOptions, missing_tools
-from video_convertor_bot.pipeline import convert_video
+from video_convertor_bot.pipeline import ConversionResult, convert_video
 
 from .client import ClaimedJob, WorkerApiError, WorkerClient
 
@@ -75,24 +77,37 @@ class TelegramDelivery:
         finally:
             await bot.shutdown()
 
-    async def send_result(self, job: ClaimedJob, path: Path, caption: str, info) -> None:
+    async def send_result(self, job: ClaimedJob, result: ConversionResult, caption: str) -> None:
         telegram = job.telegram or {}
         chat_id = int(telegram.get("chat_id") or telegram.get("chatId") or 0)
         status_message_id = telegram.get("status_message_id") or telegram.get("statusMessageId")
+        info = result.output or result.source
+        duration = int(getattr(info, "duration", 0) or 0) or None
         bot = self._bot()
         try:
             await bot.initialize()
-            with path.open("rb") as file:
-                if job.delivery_mode == "worker" and getattr(info, "used_original", False):
+            with result.output_path.open("rb") as file:
+                if result.used_original:
                     await bot.send_document(chat_id=chat_id, document=file, caption=caption)
+                elif result.conversion.kind == "gif":
+                    await bot.send_animation(
+                        chat_id=chat_id,
+                        animation=file,
+                        caption=caption,
+                        width=info.display_width or None,
+                        height=info.display_height or None,
+                        duration=duration,
+                    )
+                elif result.conversion.kind == "audio":
+                    await bot.send_audio(chat_id=chat_id, audio=file, caption=caption, duration=duration)
                 else:
                     await bot.send_video(
                         chat_id=chat_id,
                         video=file,
                         caption=caption,
-                        width=getattr(info, "width", None) or None,
-                        height=getattr(info, "height", None) or None,
-                        duration=int(getattr(info, "duration", 0) or 0) or None,
+                        width=info.display_width or None,
+                        height=info.display_height or None,
+                        duration=duration,
                         supports_streaming=True,
                     )
             if status_message_id:
@@ -109,6 +124,7 @@ async def run_one(client: WorkerClient, job: ClaimedJob, options: EncodeOptions,
     work_dir = Path(tempfile.mkdtemp(prefix=f"worker-{job.id[:12]}-"))
     try:
         source = work_dir / (job.input_name or "input.mov")
+        conversion = get_conversion(job.conversion_key)
         if job.needs_telegram_download:
             if not telegram.configured:
                 raise WorkerApiError(
@@ -139,7 +155,7 @@ async def run_one(client: WorkerClient, job: ClaimedJob, options: EncodeOptions,
         result = await convert_video(
             source,
             work_dir,
-            out_name=job.output_name,
+            out_name=f"{Path(job.output_name).stem}{conversion.extension}",
             opts=EncodeOptions(
                 ffmpeg=options.ffmpeg,
                 ffprobe=options.ffprobe,
@@ -149,6 +165,7 @@ async def run_one(client: WorkerClient, job: ClaimedJob, options: EncodeOptions,
                 audio_bitrate=options.audio_bitrate,
             ),
             progress=on_progress,
+            conversion=conversion,
         )
 
         delivered = False
@@ -157,8 +174,7 @@ async def run_one(client: WorkerClient, job: ClaimedJob, options: EncodeOptions,
                 from worker.text import describe_result
 
                 client.progress(job.id, stage="delivering", message="Sending to Telegram", progress=0.95)
-                caption = describe_result(result)
-                await telegram.send_result(job, result.output_path, caption, _DeliveryInfo.from_result(result))
+                await telegram.send_result(job, result, describe_result(result))
                 delivered = True
             else:
                 logger.warning("job %s should be delivered by the worker, but BOT_TOKEN is missing", job.id)
@@ -167,7 +183,13 @@ async def run_one(client: WorkerClient, job: ClaimedJob, options: EncodeOptions,
         output_bytes = result.source_bytes if result.used_original else result.output_bytes
         if not result.used_original:
             client.progress(job.id, stage="uploading", message="Uploading the result", progress=0.92)
-            client.upload(job.output_upload_url, job.output_upload_method, job.output_upload_headers, result.output_path)
+            client.upload(
+                job.output_upload_url,
+                job.output_upload_method,
+                job.output_upload_headers,
+                result.output_path,
+                job.output_content_type,
+            )
             output_key = job.output_key
 
         info = result.output or result.source
@@ -181,34 +203,12 @@ async def run_one(client: WorkerClient, job: ClaimedJob, options: EncodeOptions,
             saved_percent=saved,
             output_width=info.width,
             output_height=info.height,
-            output_codec=info.codec,
+            output_codec=info.codec or result.conversion.codec,
             delivered_to_telegram=delivered,
             message=None if not result.used_original else f"the original is smaller ({result.reason})",
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
-
-
-@dataclass
-class _DeliveryInfo:
-    """Just enough of a VideoInfo for the caption and the upload metadata."""
-
-    used_original: bool
-    width: int | None
-    height: int | None
-    duration: float
-    is_hdr: bool
-
-    @classmethod
-    def from_result(cls, result) -> "_DeliveryInfo":
-        info = result.output or result.source
-        return cls(
-            used_original=result.used_original,
-            width=info.display_width,
-            height=info.display_height,
-            duration=info.duration,
-            is_hdr=info.is_hdr,
-        )
 
 
 def check_ffmpeg(options: EncodeOptions) -> list[str]:

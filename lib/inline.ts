@@ -13,19 +13,21 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+import { conversionOfMeta } from "@/lib/conversions";
 import {
   type FfmpegStatus,
   EncodeTimeoutError,
   estimateEncodeSeconds,
   ffmpegStatus,
   MediaError,
+  NoAudioError,
   probe,
 } from "@/lib/encoding/ffmpeg";
 import { convertFile, savedPercent } from "@/lib/encoding/pipeline";
 import { log } from "@/lib/log";
 import type { RuntimeSettings } from "@/lib/settings/schema";
 import { MB } from "@/lib/settings/schema";
-import { convertedName, type Storage } from "@/lib/storage";
+import { conversionName, type Storage } from "@/lib/storage";
 import { outputKey as buildOutputKey } from "@/lib/storage";
 import {
   addEvent,
@@ -167,12 +169,14 @@ export async function runInlineJob(options: RunInlineOptions): Promise<InlineOut
       isHdr: Boolean(source.colorTransfer && ["arib-std-b67", "smpte2084"].includes(source.colorTransfer)),
     });
 
-    const outName = convertedName(job.input_name);
+    const conversion = conversionOfMeta(job.meta);
+    const outName = conversionName(job.input_name, conversion);
     let lastReport = 0;
     let lastTelegramEdit = 0;
     const result = await convertFile(inputPath, {
       workDir: path.join(workDir, "out"),
       outName,
+      conversion,
       crf: job.crf ?? options.settings.crf,
       preset: job.preset ?? options.settings.preset,
       timeoutSeconds,
@@ -207,7 +211,7 @@ export async function runInlineJob(options: RunInlineOptions): Promise<InlineOut
     } else {
       outputStoredKey = buildOutputKey(job.id, outName);
       const buffer = await readFile(result.outputPath);
-      await options.storage.putObject(outputStoredKey, buffer, "video/mp4");
+      await options.storage.putObject(outputStoredKey, buffer, conversion.mimeType);
       await addEvent(job.id, "info", `uploaded ${buffer.byteLength} bytes to storage`);
     }
 
@@ -220,7 +224,7 @@ export async function runInlineJob(options: RunInlineOptions): Promise<InlineOut
       sourceBytes: result.sourceBytes,
       outputWidth: result.output?.width ?? result.source.width,
       outputHeight: result.output?.height ?? result.source.height,
-      outputCodec: result.output?.codec ?? "hevc",
+      outputCodec: result.output?.codec ?? conversion.codec,
       savedPercent: percent,
       workerName: "inline",
       ffmpegVersion: status.version,
@@ -248,7 +252,7 @@ export async function runInlineJob(options: RunInlineOptions): Promise<InlineOut
     if (job.telegram_chat_id) {
       await setDelivery(job.id, "failed", message);
       if (options.settings.telegramDelivery !== "off" && telegramConfigured(options.settings)) {
-        await telegramFailure(options, job, message);
+        await telegramFailure(options, job, message, error instanceof NoAudioError);
       }
     }
     return { status: "failed", message };
@@ -304,20 +308,21 @@ async function telegramProgress(options: RunInlineOptions, job: Job, fraction: n
     .catch(() => undefined);
 }
 
-async function telegramFailure(options: RunInlineOptions, job: Job, message: string): Promise<void> {
+async function telegramFailure(options: RunInlineOptions, job: Job, message: string, noSound: boolean): Promise<void> {
   const { TelegramClient } = await import("@/lib/telegram/api");
   const client = new TelegramClient({
     token: options.settings.telegramBotToken,
     apiUrl: options.settings.telegramApiUrl,
     localMode: options.settings.telegramLocalMode,
   });
-  const { TEXT_FAILED } = await import("@/lib/telegram/texts");
+  const { TEXT_FAILED, TEXT_NO_AUDIO } = await import("@/lib/telegram/texts");
   if (job.telegram_status_message_id) {
     await client
       .editMessageText(job.telegram_chat_id!, job.telegram_status_message_id, "❌ Could not convert this video")
       .catch(() => undefined);
   }
-  await client.sendMessage(job.telegram_chat_id!, `${TEXT_FAILED}\n\nDetails: ${message}`).catch(() => undefined);
+  const headline = noSound ? TEXT_NO_AUDIO : TEXT_FAILED;
+  await client.sendMessage(job.telegram_chat_id!, `${headline}\n\nDetails: ${message}`).catch(() => undefined);
 }
 
 function describeError(error: unknown): string {

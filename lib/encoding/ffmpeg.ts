@@ -25,6 +25,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
+import { DEFAULT_CONVERSION, GIF_MAX_SECONDS, GIF_MAX_SIDE, type Conversion } from "@/lib/conversions";
 
 export const PROBE_TIMEOUT_SECONDS = 120;
 export const HDR_TRANSFERS = new Set(["arib-std-b67", "smpte2084"]); // HLG and PQ (HDR10)
@@ -34,6 +35,7 @@ export class NotAVideoError extends MediaError {}
 export class ProbeError extends MediaError {}
 export class EncodeError extends MediaError {}
 export class EncodeTimeoutError extends EncodeError {}
+export class NoAudioError extends MediaError {}
 
 export interface EncodeOptions {
   ffmpeg: string;
@@ -563,64 +565,165 @@ export function outputPixFmt(info: VideoInfo): string {
   return info.bitDepth >= 10 ? "yuv420p10le" : "yuv420p";
 }
 
-export function buildEncodeCommand(
+// The HEVC command is unchanged from before; the other conversions get their own builders.
+const HDR_TO_SDR_CHAIN =
+  "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709," +
+  "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
+
+/** Shrink so the shorter side is at most `limit`, in either orientation. Never upscales. */
+function scaleShortSide(limit: number): string {
+  return `scale=w='if(gt(iw,ih),-2,min(iw,${limit}))':h='if(gt(iw,ih),min(ih,${limit}),-2)'`;
+}
+
+/** Shrink so the longer side is at most `limit`. Never upscales. */
+function scaleLongestSide(limit: number): string {
+  return `scale=w='if(gt(iw,ih),min(iw,${limit}),-2)':h='if(gt(iw,ih),-2,min(ih,${limit}))'`;
+}
+
+type CommandOptions = Pick<EncodeOptions, "ffmpeg" | "crf" | "preset" | "audioBitrate">;
+
+function ffmpegHead(src: string, opts: CommandOptions): string[] {
+  return [opts.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", src];
+}
+
+function progressTail(dst: string): string[] {
+  return ["-progress", "pipe:1", "-nostats", dst];
+}
+
+/** The ffmpeg arguments for one conversion (see `lib/conversions.ts`). */
+export function buildConvertCommand(
   src: string,
   dst: string,
   info: VideoInfo,
-  opts: Pick<EncodeOptions, "ffmpeg" | "crf" | "preset" | "audioBitrate">,
+  opts: CommandOptions,
+  conversion: Conversion = DEFAULT_CONVERSION,
 ): string[] {
   if (!hasVideo(info)) throw new NotAVideoError("no video track to encode");
+  if (conversion.kind === "audio") return audioCommand(src, dst, info, opts, conversion);
+  if (conversion.kind === "gif") return gifCommand(src, dst, opts);
+  return videoCommand(src, dst, info, opts, conversion);
+}
+
+/** The quality-preserving HEVC encode, as it has always been. */
+export function buildEncodeCommand(src: string, dst: string, info: VideoInfo, opts: CommandOptions): string[] {
+  return buildConvertCommand(src, dst, info, opts, DEFAULT_CONVERSION);
+}
+
+function videoCommand(
+  src: string,
+  dst: string,
+  info: VideoInfo,
+  opts: CommandOptions,
+  conversion: Conversion,
+): string[] {
+  const hevc = conversion.codec === "hevc";
+  // H.264 here is 8-bit SDR. An HDR source is tone-mapped, or it would come out washed out.
+  const toSdr = !hevc && isHdr(info);
+  const filters: string[] = [];
+  if (toSdr) filters.push(HDR_TO_SDR_CHAIN);
+  if (conversion.shortSide) filters.push(scaleShortSide(conversion.shortSide));
 
   const cmd = [
-    opts.ffmpeg,
-    "-hide_banner",
-    "-nostdin",
-    "-loglevel",
-    "error",
-    "-y",
-    "-i",
-    src,
+    ...ffmpegHead(src, opts),
+    // First real video track (skips cover art) and first audio track, if any.
     "-map",
     "0:V:0",
     "-map",
     "0:a:0?",
+    // Keep capture date, GPS location and other container metadata.
     "-map_metadata",
     "0",
     "-map_chapters",
     "0",
+    // Video at a constant-quality setting. Frame rate is never changed.
     "-c:v",
-    "libx265",
+    hevc ? "libx265" : "libx264",
     "-preset",
     opts.preset,
     "-crf",
     String(opts.crf),
     "-pix_fmt",
-    outputPixFmt(info),
-    "-tag:v",
-    "hvc1",
-    "-x265-params",
-    "log-level=error",
-    "-fps_mode",
-    "passthrough",
+    hevc ? outputPixFmt(info) : "yuv420p",
   ];
+  if (hevc) cmd.push("-tag:v", "hvc1", "-x265-params", "log-level=error"); // hvc1 lets Apple devices play it
+  if (filters.length) cmd.push("-vf", filters.join(","));
+  cmd.push("-fps_mode", "passthrough"); // never duplicate or drop frames
 
-  for (const [flag, value] of [
-    ["-color_primaries", info.colorPrimaries],
-    ["-color_trc", info.colorTransfer],
-    ["-colorspace", info.colorSpace],
-    ["-color_range", info.colorRange],
-  ] as const) {
+  // Carry the HDR / colour description across unchanged, or label the tone-mapped result as SDR.
+  const colour: ReadonlyArray<readonly [string, string | null]> = toSdr
+    ? [
+        ["-color_primaries", "bt709"],
+        ["-color_trc", "bt709"],
+        ["-colorspace", "bt709"],
+        ["-color_range", "tv"],
+      ]
+    : [
+        ["-color_primaries", info.colorPrimaries],
+        ["-color_trc", info.colorTransfer],
+        ["-colorspace", info.colorSpace],
+        ["-color_range", info.colorRange],
+      ];
+  for (const [flag, value] of colour) {
     if (value) cmd.push(flag, value);
   }
 
   if (info.audioCodec === "aac") {
-    cmd.push("-c:a", "copy");
+    cmd.push("-c:a", "copy"); // bit-for-bit identical sound
   } else if (info.audioCodec) {
     cmd.push("-c:a", "aac", "-b:a", opts.audioBitrate ?? "256k");
   }
 
-  cmd.push("-movflags", "+faststart+use_metadata_tags", "-progress", "pipe:1", "-nostats", dst);
+  cmd.push("-movflags", "+faststart+use_metadata_tags", ...progressTail(dst));
   return cmd;
+}
+
+function gifCommand(src: string, dst: string, opts: CommandOptions): string[] {
+  // One palette for the whole clip (palettegen) gives much better colour than the default GIF palette.
+  const graph =
+    `[0:V:0]fps=12,${scaleLongestSide(GIF_MAX_SIDE)},split[a][b];` +
+    "[a]palettegen=stats_mode=diff[p];" +
+    "[b][p]paletteuse=dither=sierra2_4a";
+  return [
+    ...ffmpegHead(src, opts),
+    "-filter_complex",
+    graph,
+    "-an",
+    "-t",
+    String(GIF_MAX_SECONDS),
+    "-loop",
+    "0",
+    ...progressTail(dst),
+  ];
+}
+
+function audioCommand(
+  src: string,
+  dst: string,
+  info: VideoInfo,
+  opts: CommandOptions,
+  conversion: Conversion,
+): string[] {
+  if (!info.audioCodec) throw new NoAudioError("this video has no sound to save");
+  let codec: string[];
+  if (conversion.codec === "mp3") {
+    codec = ["-c:a", "libmp3lame", "-b:a", "192k"];
+  } else if (info.audioCodec === "aac") {
+    codec = ["-c:a", "copy"]; // no quality loss at all
+  } else {
+    codec = ["-c:a", "aac", "-b:a", opts.audioBitrate ?? "256k"];
+  }
+  const movflags = conversion.extension === ".m4a" ? ["-movflags", "+faststart"] : [];
+  return [
+    ...ffmpegHead(src, opts),
+    "-vn",
+    "-map",
+    "0:a:0",
+    ...codec,
+    "-map_metadata",
+    "0",
+    ...movflags,
+    ...progressTail(dst),
+  ];
 }
 
 export function parseProgressFraction(line: string, duration: number): number | null {
@@ -710,13 +813,29 @@ export function logTail(logPath: string, lines = 12): string {
   }
 }
 
-/** Compare the converted file with the original. An empty list means it looks right. */
-export function verifyOutput(source: VideoInfo, output: VideoInfo): string[] {
+/**
+ * Compare the converted file with the original. An empty list means it looks right.
+ * Defaults to the HEVC checks, which is what the web app has always run.
+ */
+export function verifyOutput(source: VideoInfo, output: VideoInfo, conversion: Conversion = DEFAULT_CONVERSION): string[] {
+  if (conversion.kind === "audio") return verifyAudio(source, output, conversion);
+  if (conversion.kind === "gif") return verifyGif(output);
+  return verifyVideo(source, output, conversion);
+}
+
+function verifyVideo(source: VideoInfo, output: VideoInfo, conversion: Conversion): string[] {
   if (!hasVideo(output)) return ["converted file has no video"];
 
   const problems: string[] = [];
-  if (output.codec !== "hevc") problems.push(`codec is ${output.codec}, expected hevc`);
-  if (displayWidth(output) !== displayWidth(source) || displayHeight(output) !== displayHeight(source)) {
+  if (output.codec !== conversion.codec) problems.push(`codec is ${output.codec}, expected ${conversion.codec}`);
+  if (conversion.shortSide) {
+    const wanted = Math.min(Math.min(displayWidth(source), displayHeight(source)), conversion.shortSide);
+    const got = Math.min(displayWidth(output), displayHeight(output));
+    if (Math.abs(got - wanted) > 2) problems.push(`shorter side is ${got}px, expected about ${wanted}px`);
+    const outShape = displayWidth(output) / displayHeight(output);
+    const srcShape = displayWidth(source) / displayHeight(source);
+    if (Math.abs(outShape - srcShape) > 0.02) problems.push("picture shape changed");
+  } else if (displayWidth(output) !== displayWidth(source) || displayHeight(output) !== displayHeight(source)) {
     problems.push(
       `resolution changed from ${displayWidth(source)}x${displayHeight(source)} to ${displayWidth(output)}x${displayHeight(output)}`,
     );
@@ -725,9 +844,32 @@ export function verifyOutput(source: VideoInfo, output: VideoInfo): string[] {
     problems.push("duration changed");
   }
   if (source.fps && output.fps && Math.abs(source.fps - output.fps) > 0.01) problems.push("frame rate changed");
-  if (output.bitDepth < Math.min(source.bitDepth, 10)) problems.push("bit depth dropped");
-  if (source.colorTransfer && output.colorTransfer !== source.colorTransfer) problems.push("colour transfer changed");
+  if (conversion.codec === "hevc") {
+    // H.264 output is 8-bit SDR on purpose, so only HEVC keeps bit depth and colour.
+    if (output.bitDepth < Math.min(source.bitDepth, 10)) problems.push("bit depth dropped");
+    if (source.colorTransfer && output.colorTransfer !== source.colorTransfer) problems.push("colour transfer changed");
+  }
   if (source.audioCodec && !output.audioCodec) problems.push("audio track missing");
+  return problems;
+}
+
+function verifyGif(output: VideoInfo): string[] {
+  // Duration is not checked: ffprobe often cannot report one for a GIF.
+  if (output.codec !== "gif") return [`codec is ${output.codec}, expected gif`];
+  if (Math.max(output.width, output.height) > GIF_MAX_SIDE) {
+    return [`GIF is ${output.width}x${output.height}, larger than ${GIF_MAX_SIDE}px`];
+  }
+  return [];
+}
+
+function verifyAudio(source: VideoInfo, output: VideoInfo, conversion: Conversion): string[] {
+  const problems: string[] = [];
+  if (output.audioCodec !== conversion.codec) {
+    problems.push(`audio is ${output.audioCodec}, expected ${conversion.codec}`);
+  }
+  if (source.duration > 0 && output.duration > 0 && Math.abs(output.duration - source.duration) > Math.max(0.5, source.duration * 0.02)) {
+    problems.push("duration changed");
+  }
   return problems;
 }
 

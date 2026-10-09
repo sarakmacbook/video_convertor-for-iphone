@@ -32,8 +32,12 @@ export interface ClaimJobPayload {
     headers: Record<string, string>;
     key: string;
     name: string;
+    /** The MIME type the result is stored and sent with. */
+    contentType: string;
   };
   encoding: {
+    /** What to make from the video: a key of `lib/conversions.ts`, e.g. "hevc" or "gif". */
+    conversion: string;
     crf: number;
     preset: string;
     /** How long the worker may spend on this job before it should give up. */
