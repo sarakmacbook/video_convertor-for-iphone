@@ -2,7 +2,7 @@
  * "Test this" buttons on the Settings page: database, storage, ffmpeg, Telegram.
  */
 
-import { databaseStatus } from "@/lib/db";
+import { databaseStatus, testDatabaseConnection } from "@/lib/db";
 import { ffmpegStatus } from "@/lib/encoding/ffmpeg";
 import { fail, handleRouteError, isAuthorized, json, readJson, unauthorized } from "@/lib/http";
 import { getSettings } from "@/lib/settings";
@@ -16,6 +16,7 @@ export const maxDuration = 60;
 
 interface TestRequest {
   target?: "database" | "storage" | "ffmpeg" | "telegram";
+  url?: string;
   chatId?: number | null;
 }
 
@@ -27,6 +28,10 @@ export async function POST(request: Request) {
 
     switch (body.target) {
       case "database": {
+        if (body.url?.trim()) {
+          const result = await testDatabaseConnection(body.url);
+          return json(result);
+        }
         const status = await databaseStatus();
         return json({
           ok: status.connected,

@@ -392,6 +392,68 @@ describe("the settings page", () => {
     expect(token.value).toBe(""); // the key is not kept in the page after it is saved
   });
 
+  it("tests and connects a database from the Settings page", async () => {
+    const tests: unknown[] = [];
+    const connects: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : String(input);
+        const method = init?.method ?? "GET";
+        if (url === "/api/config" && method === "GET") return jsonResponse(config);
+        if (url === "/api/health") return jsonResponse(health);
+        if (url === "/api/config/test" && method === "POST") {
+          tests.push(JSON.parse(String(init?.body)));
+          return jsonResponse({ ok: true, detail: "sqlite reachable · 3.45.1; jobs, app_settings" });
+        }
+        if (url === "/api/db/connect" && method === "POST") {
+          connects.push(JSON.parse(String(init?.body)));
+          return jsonResponse({
+            ok: true,
+            isVercel: false,
+            status: { dialect: "sqlite", label: "app.db", connected: true },
+          });
+        }
+        throw new Error(`unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<SettingsForm />);
+    await screen.findByText("postgres");
+
+    // The Connect database card is present
+    expect(screen.getByRole("heading", { name: "Connect database" })).toBeTruthy();
+
+    const dbInput = screen.getByLabelText(/Database connection string/) as HTMLInputElement;
+    const connectBtn = screen.getByRole("button", { name: "Connect database" }) as HTMLButtonElement;
+    expect(connectBtn.disabled).toBe(true);
+
+    // Use local SQLite preset
+    const sqlitePreset = screen.getByRole("button", { name: "Use local SQLite" });
+    fireEvent.click(sqlitePreset);
+    expect(dbInput.value).toBe("file:./.data/app.db");
+    expect(connectBtn.disabled).toBe(false);
+
+    // Test connection button
+    const testButtons = screen.getAllByRole("button", { name: "Test connection" });
+    const testDbInputBtn = testButtons[testButtons.length - 1]; // the one in the Connect database card
+    await act(async () => {
+      fireEvent.click(testDbInputBtn);
+    });
+
+    expect(tests).toEqual([{ target: "database", url: "file:./.data/app.db" }]);
+    expect(await screen.findByText(/Database test: sqlite reachable/)).toBeTruthy();
+
+    // Connect database button
+    await act(async () => {
+      fireEvent.click(connectBtn);
+    });
+
+    expect(connects).toEqual([{ url: "file:./.data/app.db" }]);
+    expect(await screen.findByText(/Connected to sqlite \(app\.db\)\. Saved to \.env and schema migrated\./)).toBeTruthy();
+    expect(dbInput.value).toBe("");
+  });
+
   it("asks for the password when the deployment is protected", async () => {
     vi.stubGlobal(
       "fetch",

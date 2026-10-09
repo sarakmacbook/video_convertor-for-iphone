@@ -48,11 +48,14 @@ Quick start:
 
 ```bash
 npm install
-cp .env.example .env          # DATABASE_URL, STORAGE_DRIVER, APP_PASSWORD, APP_SECRET…
-npm run dev                   # http://localhost:3000
+npm run dev                   # http://localhost:3000 (uses local SQLite + storage out of the box)
 ```
 
-On Vercel: import the repository, connect a Blob store, set `DATABASE_URL` plus `APP_PASSWORD`
+To connect an external database (PostgreSQL, Neon, Supabase, MySQL, Turso):
+- In the web app: open **Settings → Connect database**, paste your connection string, test it, and click Connect.
+- In the terminal: run `npm run db:connect` to test, migrate, and save `DATABASE_URL` to `.env`.
+
+On Vercel: import the repository, connect a Blob store, set `DATABASE_URL` (or let it auto-detect `POSTGRES_URL` from Vercel Postgres / Neon) plus `APP_PASSWORD`
 and `APP_SECRET`, and deploy. **[docs/VERCEL.md](docs/VERCEL.md)** has the full guide (database
 URLs per provider, S3 CORS, ffmpeg on Vercel, the Telegram webhook, workers and tuning).
 

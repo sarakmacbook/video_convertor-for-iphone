@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:migrate": "tsx scripts/db-migrate.ts",
+    "db:connect": "tsx scripts/db-connect.ts",
     "worker": "tsx cli/worker.ts",
     "worker:status": "tsx cli/worker.ts --status"
   },
