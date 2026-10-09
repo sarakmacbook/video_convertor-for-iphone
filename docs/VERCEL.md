@@ -89,6 +89,11 @@ Notes:
 `STORAGE_DRIVER` decides. Uploads always go from the browser straight to storage with a signed
 URL — never through a function — so the 4.5 MB request body limit does not apply.
 
+To raise the web app's accepted input size, open **Settings → Encoding**, increase **Largest
+accepted video (MB)**, and save. The app supports up to 2000 MB (2 GB); files above the inline
+conversion limits need an external worker. This is only the app's admission limit—check your
+Blob/S3 provider's object limits, available storage, and the worker's disk space before raising it.
+
 **Vercel Blob** (default on Vercel):
 
 1. In the Vercel dashboard: *Storage* → *Create Database* → *Blob* → connect it to the project.

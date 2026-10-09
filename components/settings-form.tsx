@@ -39,6 +39,7 @@ interface ConfigResponse {
   envProblems: string[];
   databaseConfigured: boolean;
   storageDriver: string;
+  limits: { maxUploadMb: number };
   effective: Record<string, string | number | boolean>;
 }
 
@@ -67,7 +68,7 @@ const SELECT_OPTIONS: Record<string, string[]> = {
 const HELP: Record<string, string> = {
   crf: "Quality, 0–51. Lower is closer to the original and bigger. 18–22 is the useful range.",
   preset: "Encoder speed. Slower presets make slightly smaller files and take much longer.",
-  max_input_mb: "Largest video accepted from the web UI and from Telegram.",
+  max_input_mb: "Largest video accepted from the web UI and from Telegram. Increase this value and save to allow larger files. For Telegram, the public Bot API still caps downloads at 20 MB; larger videos need a local Bot API server.",
   inline_max_input_mb: "Files up to this size may be converted inside the deployment (no worker).",
   inline_max_seconds: "Time budget for an inline conversion; longer jobs wait for a worker.",
   inline_speed_factor: "How fast the encoder is expected to run, as a multiple of real time (0.4 ≈ 2.5× longer than the video).",
@@ -327,7 +328,11 @@ export function SettingsForm() {
         ) : (
           <input
             id={`setting-${key}`}
-            type={entry.isSecret ? "password" : "text"}
+            type={entry.isSecret ? "password" : key === "max_input_mb" ? "number" : "text"}
+            inputMode={key === "max_input_mb" ? "numeric" : undefined}
+            min={key === "max_input_mb" ? 1 : undefined}
+            max={key === "max_input_mb" ? config.limits.maxUploadMb : undefined}
+            step={key === "max_input_mb" ? 1 : undefined}
             autoComplete={entry.isSecret ? "new-password" : undefined}
             spellCheck={false}
             value={entry.isSecret && draft[key] === undefined ? "" : value}
@@ -335,7 +340,12 @@ export function SettingsForm() {
             onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))}
           />
         )}
-        {HELP[key] && <div className="help">{HELP[key]}</div>}
+        {HELP[key] && (
+          <div className="help">
+            {HELP[key]}
+            {key === "max_input_mb" && ` Maximum supported size: ${config.limits.maxUploadMb} MB.`}
+          </div>
+        )}
         {entry.source === "database" && (
           <button className="btn small ghost" style={{ marginTop: 6 }} onClick={() => void clearKey(key)} disabled={busy === key}>
             Use the environment value instead

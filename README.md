@@ -155,10 +155,16 @@ Telegram's public bot server limits what a bot can handle:
 
 | | Public Telegram server (default) | Local Bot API server (`--local`) |
 |---|---|---|
-| Videos the bot can receive | up to **20 MB** | no Telegram limit (the bot allows 1000 MB by default, capped at 1 GB, see `MAX_INPUT_MB`) |
+| Videos the bot can receive | up to **20 MB** | up to **2000 MB** (the bot defaults to 1000 MB; raise it with `MAX_INPUT_MB`) |
 | Files the bot can send | up to **50 MB** | up to **2000 MB** |
 
-Most iPhone clips are bigger than 20 MB, so for real use you need the local server. It is Telegram's open-source Bot API server, run on the same Mac as the bot. The bot then copies the video from the server's disk instead of downloading it over the network.
+Most iPhone clips are bigger than 20 MB, so for real use you need the local server. It is
+Telegram's open-source Bot API server, run on the same Mac as the bot. The bot then copies the
+video from the server's disk instead of downloading it over the network. In local mode, raise the
+bot's limit with `MAX_INPUT_MB=1500` in `.env` (up to 2000 MB). For the web app, use **Settings →
+Encoding → Largest accepted video (MB)** and save; it also supports up to 2000 MB. Large web
+uploads go directly to Blob/S3 or local storage; make sure you have enough storage and run a
+worker for large conversions.
 
 1. **Get an API ID and hash.** Log in at [my.telegram.org](https://my.telegram.org), open *API development tools*, and create an application. You get an `api_id` and an `api_hash`. See [Telegram's guide](https://core.telegram.org/api/obtaining_api_id).
 2. **Build the server** from the [official build instructions](https://tdlib.github.io/telegram-bot-api/build.html). Choose macOS on that page. It is compiled from source and takes a while.
@@ -185,10 +191,9 @@ Keep the bot and the server on the same machine. Local mode needs both to see th
 
 ## Settings
 
-For the bot, all settings are environment variables, or lines in `.env`. See `.env.example`.
-The web app reads the same variables, and lets you override the quality, limits, allowed user
-IDs and Telegram details on its Settings page — those live in the database and win over the
-environment, so you can retune without a redeploy.
+For the bot, settings are environment variables, or lines in `.env`. See `.env.example`.
+The web app lets you override the accepted video size, quality, allowed user IDs and Telegram
+details on its Settings page — those live in the database, so you can retune without a redeploy.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -198,7 +203,7 @@ environment, so you can retune without a redeploy.
 | `ALLOWED_USER_IDS` | *(empty: anyone)* | Comma-separated Telegram user IDs allowed to use the bot. |
 | `CRF` | `20` | Quality, 0 to 51. Lower is closer to the original and bigger. 18 to 22 is the useful range. |
 | `X265_PRESET` | `medium` | Encoder speed. Slower presets give slightly smaller files and take much longer. |
-| `MAX_INPUT_MB` | `20`, or `1000` in local mode | Largest video the bot accepts. Capped at 1000 MB (1 GB) even if set higher. |
+| `MAX_INPUT_MB` | `20`, or `1000` in local mode | Largest video the bot accepts. Raise it up to 2000 MB (2 GB) when using a local Bot API server. |
 | `MAX_CONCURRENT_JOBS` | `1` | Conversions running at once. Others wait in a queue. |
 | `FFMPEG_TIMEOUT_SECONDS` | `7200` | Stop a conversion that runs longer than this. |
 | `FFMPEG_BIN`, `FFPROBE_BIN` | `ffmpeg`, `ffprobe` | Paths to the binaries, if they are not on `PATH`. |
