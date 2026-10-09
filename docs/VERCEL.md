@@ -66,22 +66,25 @@ The migration is idempotent and safe to run repeatedly.
 | Service | `DATABASE_URL` |
 |---|---|
 | Neon | `postgres://user:password@ep-xxx.eu-central-1.aws.neon.tech/neondb?sslmode=require` |
-| Vercel Postgres | `postgres://…` — copy the URL from the Storage tab |
+| Vercel Postgres | `postgres://…` — copy the URL from the Storage tab (or automatically detected from `POSTGRES_URL`) |
 | Supabase | `postgres://postgres.<ref>:<password>@aws-0-eu-central-1.pooler.supabase.com:6543/postgres` |
 | Any Postgres | `postgres://user:password@host:5432/dbname?sslmode=require` |
 | PlanetScale | `mysql://user:password@aws.connect.psdb.cloud/dbname?ssl={"rejectUnauthorized":true}` |
 | Any MySQL | `mysql://user:password@host:3306/dbname` |
-| Turso | `libsql://db-name-yourname.turso.io?authToken=eyJ…` |
-| Local SQLite (Docker, a VM, a mounted volume) | `file:./.data/app.db` or `/var/lib/convertor/app.db` |
+| Turso | `libsql://db-name-yourname.turso.io?authToken=eyJ…` (or `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`) |
+| Local SQLite (Docker, a VM, a mounted volume) | `file:./.data/app.db` or `/var/lib/convertor/app.db` (default outside Vercel) |
 
 Notes:
 
+- **Automatic detection**: Vercel Postgres / Neon (`POSTGRES_URL`), Turso (`TURSO_DATABASE_URL`), and MySQL (`MYSQL_URL`) are detected automatically if `DATABASE_URL` is not set explicitly.
+- **Easy connect**: You can test and connect a database from **Settings → Connect database** in the web app, or run `npm run db:connect` in your terminal.
+- **Tolerant parsing**: Pasted connection strings with quotes (`"..."`), `psql '...'` wrappers, and `DATABASE_URL=` prefixes are cleaned automatically.
 - Connection strings in `.env` need quotes when they contain `&` or `{`/`}`.
 - Serverless Postgres/MySQL providers and poolers work; if your provider offers a pooled and a
   direct URL, the pooled one is the right choice for the app, and the direct one for
   `npm run db:migrate` if migrations fail through the pooler.
 - SQLite is fine in Docker with a volume, but **not** on Vercel: functions have a read-only
-  filesystem apart from `/tmp`, which disappears between requests.
+  filesystem apart from `/tmp`, which disappears between requests. Outside Vercel, SQLite is the default.
 - The password/token is masked everywhere it is displayed, including the Settings page.
 
 ### Storage

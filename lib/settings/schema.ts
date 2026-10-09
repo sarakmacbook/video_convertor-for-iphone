@@ -14,6 +14,7 @@
 
 import { z } from "zod";
 
+import { detectedDatabaseSource } from "@/lib/db";
 import { parseBotToken } from "@/lib/telegram/connect";
 
 export const X265_PRESETS = [
@@ -116,6 +117,7 @@ export interface EnvSettings {
   storageDir: string;
   logLevel: string;
   databaseUrlSet: boolean;
+  databaseSource?: string;
   tmpDir: string;
   ffmpegPath: string | null;
   ffprobePath: string | null;
@@ -130,6 +132,7 @@ function env(name: string): string {
 
 export function loadEnvSettings(): EnvSettings {
   const isVercel = Boolean(process.env.VERCEL);
+  const detectedDb = detectedDatabaseSource();
   return {
     nodeEnv: env("NODE_ENV") || "development",
     appUrl: env("APP_URL") || (env("VERCEL_URL") ? `https://${env("VERCEL_URL")}` : null),
@@ -139,12 +142,13 @@ export function loadEnvSettings(): EnvSettings {
     storageDriver: env("STORAGE_DRIVER") || (isVercel ? "blob" : "local"),
     storageDir: env("STORAGE_DIR") || (isVercel ? "/tmp/storage" : "./.data/storage"),
     logLevel: env("LOG_LEVEL") || "INFO",
-    databaseUrlSet: Boolean(env("DATABASE_URL")),
+    databaseUrlSet: Boolean(detectedDb),
+    databaseSource: detectedDb?.source,
     tmpDir: env("WORK_DIR") || (isVercel ? "/tmp" : "./.data/tmp"),
     ffmpegPath: env("FFMPEG_PATH") || env("FFMPEG_BIN") || null,
     ffprobePath: env("FFPROBE_PATH") || env("FFPROBE_BIN") || null,
     ffmpegUrl: env("FFMPEG_URL") || null,
-    source: env("DATABASE_URL") ? "env" : "default",
+    source: detectedDb ? (detectedDb.source === "default" ? "default" : "env") : "default",
     isVercel,
   };
 }

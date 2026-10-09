@@ -30,13 +30,87 @@ export interface DatabaseTarget {
 export class DatabaseUrlError extends Error {}
 
 const SQLITE_PATH_SCHEMES = ["file:", "sqlite:", "sqlite3:"];
+const INVISIBLE_RE = /[\u200b-\u200d\ufeff\u00a0]/g;
+
+/**
+ * Clean up a connection string that may have been copied from a dashboard, terminal, or .env file.
+ * Handles outer quotes, `psql '...'` wrappers, `export DATABASE_URL=...` assignments, and extra spaces.
+ */
+export function cleanDatabaseUrl(raw: string | undefined | null): string {
+  if (!raw) return "";
+  let text = String(raw).replace(INVISIBLE_RE, " ").trim();
+
+  // Strip leading variable assignments (e.g. export DATABASE_URL=..., POSTGRES_URL=...)
+  text = text
+    .replace(
+      /^(?:export\s+)?(?:DATABASE_URL|POSTGRES_URL|POSTGRES_PRISMA_URL|POSTGRES_URL_NON_POOLING|SUPABASE_DB_URL|TURSO_DATABASE_URL|LIBSQL_URL|MYSQL_URL)\s*=\s*/i,
+      "",
+    )
+    .trim();
+
+  // Strip 'psql ' wrapper (common command copied from Neon/Supabase dashboards)
+  if (/^psql\s+/i.test(text)) {
+    text = text.replace(/^psql\s+/i, "").trim();
+  }
+
+  // Unwrap outer quotes: "...", '...', `...`, <...>
+  for (let i = 0; i < 2; i++) {
+    text = text.trim();
+    if (
+      text.length >= 2 &&
+      ((text[0] === text[text.length - 1] && (text[0] === '"' || text[0] === "'" || text[0] === "`")) ||
+        (text[0] === "<" && text[text.length - 1] === ">"))
+    ) {
+      text = text.slice(1, -1).trim();
+    }
+  }
+
+  // If psql was nested inside quotes (e.g. "psql 'postgres://...'")
+  if (/^psql\s+/i.test(text)) {
+    text = text.replace(/^psql\s+/i, "").trim();
+    if (
+      text.length >= 2 &&
+      text[0] === text[text.length - 1] &&
+      (text[0] === '"' || text[0] === "'" || text[0] === "`")
+    ) {
+      text = text.slice(1, -1).trim();
+    }
+  }
+
+  // Map prisma+postgres:// -> postgres://
+  if (text.toLowerCase().startsWith("prisma+postgres://")) {
+    text = "postgres://" + text.slice("prisma+postgres://".length);
+  } else if (text.toLowerCase().startsWith("prisma+postgresql://")) {
+    text = "postgresql://" + text.slice("prisma+postgresql://".length);
+  }
+
+  return text;
+}
 
 function stripScheme(raw: string, scheme: string): string {
   return raw.slice(scheme.length).replace(/^\/\//, "");
 }
 
+function extractHostAndDb(value: string, defaultDb: string): { host: string; database: string } {
+  const url = safeUrl(value);
+  if (url) {
+    return {
+      host: url.host || "unknown",
+      database: url.pathname.replace(/^\//, "") || defaultDb,
+    };
+  }
+  const match = value.match(/@([^/?#:]+(?::\d+)?)(?:\/([^?#]+))?/);
+  if (match) {
+    return {
+      host: match[1] || "unknown",
+      database: match[2] || defaultDb,
+    };
+  }
+  return { host: "unknown", database: defaultDb };
+}
+
 export function parseDatabaseUrl(raw: string | undefined | null): DatabaseTarget {
-  const value = (raw ?? "").trim();
+  const value = cleanDatabaseUrl(raw);
   if (!value) {
     throw new DatabaseUrlError(
       "DATABASE_URL is not set. Point it at PostgreSQL, MySQL, SQLite or Turso — see docs/VERCEL.md.",
@@ -46,41 +120,42 @@ export function parseDatabaseUrl(raw: string | undefined | null): DatabaseTarget
   const lower = value.toLowerCase();
 
   if (lower.startsWith("postgres://") || lower.startsWith("postgresql://")) {
-    const url = safeUrl(value);
+    const { host, database } = extractHostAndDb(value, "postgres");
     return {
       dialect: "postgres",
       display: redactUrl(value),
-      host: url?.host ?? "unknown",
-      database: url?.pathname.replace(/^\//, "") || "postgres",
+      host,
+      database,
       isLocalFile: false,
     };
   }
 
   if (lower.startsWith("mysql://") || lower.startsWith("mysql2://")) {
     const normalised = lower.startsWith("mysql2://") ? `mysql://${value.slice(9)}` : value;
-    const url = safeUrl(normalised);
+    const { host, database } = extractHostAndDb(normalised, "mysql");
     return {
       dialect: "mysql",
       display: redactUrl(normalised),
-      host: url?.host ?? "unknown",
-      database: url?.pathname.replace(/^\//, "") || "mysql",
+      host,
+      database,
       isLocalFile: false,
     };
   }
 
   if (lower.startsWith("libsql://") || lower.startsWith("wss://") || lower.startsWith("ws://")) {
-    const url = safeUrl(value);
+    const { host, database } = extractHostAndDb(value, "main");
     return {
       dialect: "libsql",
       display: redactUrl(value),
-      host: url?.host ?? "unknown",
-      database: url?.pathname.replace(/^\//, "") || "main",
+      host,
+      database,
       isLocalFile: false,
     };
   }
 
   if (lower.startsWith("http://") || lower.startsWith("https://")) {
     // Turso also serves a plain HTTPS endpoint (https://<db>.turso.io) with ?authToken=…
+    const { host, database } = extractHostAndDb(value, "main");
     const url = safeUrl(value);
     const looksLikeTurso = /turso\.io|libsql/i.test(url?.host ?? "");
     if (!looksLikeTurso && !url?.searchParams.has("authToken")) {
@@ -91,8 +166,8 @@ export function parseDatabaseUrl(raw: string | undefined | null): DatabaseTarget
     return {
       dialect: "libsql",
       display: redactUrl(value),
-      host: url?.host ?? "unknown",
-      database: url?.pathname.replace(/^\//, "") || "main",
+      host,
+      database,
       isLocalFile: false,
     };
   }
@@ -138,9 +213,10 @@ export function libsqlConfig(raw: string): { url: string; authToken?: string } {
   if (lower.startsWith("file:")) {
     return { url: value };
   }
-  if (lower.startsWith("http://") || lower.startsWith("https://")) {
-    // libSQL talks to Turso over WebSocket/HTTP; the SDK maps https:// to its own transport.
-    return { url: value };
+  if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("libsql://") || lower.startsWith("wss://")) {
+    const url = safeUrl(value);
+    const authToken = url?.searchParams.get("authToken") ?? process.env.TURSO_AUTH_TOKEN ?? process.env.LIBSQL_AUTH_TOKEN;
+    return { url: value, authToken: authToken ?? undefined };
   }
   return { url: value };
 }
@@ -155,7 +231,12 @@ function safeUrl(value: string): URL | null {
 
 export function redactUrl(value: string): string {
   const url = safeUrl(value);
-  if (!url) return value.replace(/:\/\/([^:@/]+):([^@/]+)@/, "://$1:***@");
+  if (!url) {
+    return value
+      .replace(/:\/\/([^:@/]+):([^@/]+)@/, "://$1:***@")
+      .replace(/([?&]authToken=)[^&]+/i, "$1***")
+      .replace(/([?&]password=)[^&]+/i, "$1***");
+  }
   if (url.password) url.password = "***";
   if (url.searchParams.has("authToken")) url.searchParams.set("authToken", "***");
   if (url.searchParams.has("password")) url.searchParams.set("password", "***");

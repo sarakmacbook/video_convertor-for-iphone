@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { cleanDatabaseUrl } from "@/lib/db/url";
 import { parseBotToken, parseUserId } from "@/lib/telegram/connect";
 
 interface SettingEntry {
@@ -28,6 +29,7 @@ interface ConfigResponse {
     storageDriver: string;
     storageDir: string;
     databaseUrlSet: boolean;
+    databaseSource?: string;
     isVercel: boolean;
     ffmpegPath: string | null;
     ffmpegUrl: string | null;
@@ -91,6 +93,7 @@ export function SettingsForm() {
   const [busy, setBusy] = useState<string | null>(null);
   const [testChatId, setTestChatId] = useState("");
   const [publicUrl, setPublicUrl] = useState("");
+  const [connectDbUrl, setConnectDbUrl] = useState("");
   const [connectToken, setConnectToken] = useState("");
   const [connectUserId, setConnectUserId] = useState("");
   const [needsLogin, setNeedsLogin] = useState(false);
@@ -179,6 +182,82 @@ export function SettingsForm() {
       setBusy(null);
     }
   }, [testChatId, load]);
+
+  const testDatabase = useCallback(
+    async (customUrl?: string) => {
+      setBusy("test:database");
+      try {
+        const response = await fetch("/api/config/test", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ target: "database", url: customUrl?.trim() || undefined }),
+        });
+        const body = (await response.json()) as { ok: boolean; detail?: string; error?: string };
+        setMessage({
+          tone: body.ok ? "good" : "bad",
+          text: `Database test: ${body.detail ?? body.error ?? (body.ok ? "reachable" : "failed")}`,
+        });
+        await load();
+      } catch (error) {
+        setMessage({
+          tone: "bad",
+          text: `Database test failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      } finally {
+        setBusy(null);
+      }
+    },
+    [load],
+  );
+
+  const connectDatabase = useCallback(async () => {
+    const cleaned = cleanDatabaseUrl(connectDbUrl);
+    if (!cleaned) {
+      setMessage({
+        tone: "bad",
+        text: "Please enter a database connection string, or click 'Use local SQLite'.",
+      });
+      return;
+    }
+    setBusy("connect-db");
+    try {
+      const response = await fetch("/api/db/connect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: cleaned }),
+      });
+      const body = (await response.json()) as {
+        ok: boolean;
+        error?: string;
+        isVercel?: boolean;
+        status?: { dialect?: string; label?: string };
+      };
+      if (!body.ok) {
+        setMessage({ tone: "bad", text: body.error ?? "could not connect to the database" });
+        return;
+      }
+      setConnectDbUrl("");
+      if (body.isVercel) {
+        setMessage({
+          tone: "good",
+          text: `Database connected and migrated in this session! To persist it across Vercel deploys, set DATABASE_URL in your Vercel Project Settings.`,
+        });
+      } else {
+        setMessage({
+          tone: "good",
+          text: `Connected to ${body.status?.dialect ?? "database"} (${body.status?.label ?? "ready"}). Saved to .env and schema migrated.`,
+        });
+      }
+      await load();
+    } catch (error) {
+      setMessage({
+        tone: "bad",
+        text: `Could not connect: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [connectDbUrl, load]);
 
   const webhook = useCallback(
     async (action: "set" | "delete" | "info") => {
@@ -526,6 +605,69 @@ export function SettingsForm() {
 
       <div className="card">
         <div className="card-title">
+          <h2>Connect database</h2>
+          <div className="spacer" />
+          <span className={`pill ${health?.database.connected ? "good" : "warn"}`}>
+            <span className="dot" /> {health?.database.connected ? "connected" : "not connected"}
+          </span>
+        </div>
+        <p className="dim" style={{ marginTop: 0 }}>
+          Connect PostgreSQL (Neon, Vercel Postgres, Supabase), MySQL, SQLite or Turso. Connecting verifies the credentials, creates the tables, and saves the connection.
+        </p>
+        <div className="field">
+          <label htmlFor="connect-db-url">Database connection string</label>
+          <input
+            id="connect-db-url"
+            name="database-url"
+            type="text"
+            autoComplete="off"
+            spellCheck={false}
+            value={connectDbUrl}
+            onChange={(event) => setConnectDbUrl(event.target.value)}
+            onPaste={(event) => {
+              const text = event.clipboardData.getData("text");
+              const cleaned = cleanDatabaseUrl(text);
+              if (cleaned && cleaned !== text.trim()) {
+                event.preventDefault();
+                setConnectDbUrl(cleaned);
+              }
+            }}
+            placeholder="postgres://user:password@host/db or file:./.data/app.db"
+          />
+          <div className="help">
+            Paste a full URL or snippet from your provider. Surrounding quotes and <code className="mono">psql</code> prefixes are cleaned automatically.
+          </div>
+        </div>
+        <div className="btn-row">
+          <button
+            className="btn small ghost"
+            type="button"
+            onClick={() => setConnectDbUrl("file:./.data/app.db")}
+          >
+            Use local SQLite
+          </button>
+          <div className="spacer" />
+          <button
+            className="btn small"
+            type="button"
+            onClick={() => void testDatabase(connectDbUrl)}
+            disabled={busy === "test:database" || !connectDbUrl.trim()}
+          >
+            {busy === "test:database" ? "Testing…" : "Test connection"}
+          </button>
+          <button
+            className="btn primary small"
+            type="button"
+            onClick={() => void connectDatabase()}
+            disabled={busy === "connect-db" || !connectDbUrl.trim()}
+          >
+            {busy === "connect-db" ? "Connecting…" : "Connect database"}
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-title">
           <h2>Connect your bot</h2>
           <div className="spacer" />
           <span className={`pill ${health?.telegram.configured ? "good" : "warn"}`}>
@@ -703,7 +845,17 @@ export function SettingsForm() {
         </p>
         <dl className="kv">
           <dt>DATABASE_URL</dt>
-          <dd>{config.env.databaseUrlSet ? <span className="pill good">set</span> : <span className="pill bad">missing</span>}</dd>
+          <dd>
+            {config.env.databaseUrlSet ? (
+              <span className="pill good">
+                {config.env.databaseSource && config.env.databaseSource !== "DATABASE_URL"
+                  ? config.env.databaseSource
+                  : "set"}
+              </span>
+            ) : (
+              <span className="pill bad">missing</span>
+            )}
+          </dd>
           <dt>STORAGE_DRIVER</dt>
           <dd>{config.env.storageDriver}</dd>
           <dt>Storage location</dt>
