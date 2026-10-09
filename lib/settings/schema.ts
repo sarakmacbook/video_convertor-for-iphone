@@ -35,6 +35,8 @@ export const CLOUD_DOWNLOAD_LIMIT_MB = 20;
 export const CLOUD_UPLOAD_LIMIT_MB = 50;
 /** A self-hosted Bot API server (--local) raises both to 2000 MB. */
 export const LOCAL_SERVER_LIMIT_MB = 2000;
+/** Hard cap on any uploaded video, whatever the settings say: 1 GB. */
+export const MAX_UPLOAD_MB = 1000;
 export const MB = 1_000_000;
 export const DEFAULT_API_URL = "https://api.telegram.org";
 
@@ -44,7 +46,7 @@ export const DEFAULT_BOT_TOKEN_ENV = "BOT_TOKEN";
 export const overridableSettings = {
   crf: z.coerce.number().int().min(0).max(51),
   preset: z.enum(X265_PRESETS),
-  max_input_mb: z.coerce.number().int().min(1).max(LOCAL_SERVER_LIMIT_MB),
+  max_input_mb: z.coerce.number().int().min(1).max(MAX_UPLOAD_MB),
   allowed_user_ids: z.string().regex(/^[\d,\s]*$/, "comma-separated Telegram user IDs"),
   inline_max_input_mb: z.coerce.number().int().min(1).max(200),
   inline_max_seconds: z.coerce.number().int().min(5).max(900),
@@ -158,7 +160,7 @@ export function defaultSettings(envSettings: EnvSettings = loadEnvSettings()): R
   return {
     crf: 20,
     preset: "medium",
-    maxInputMb: localServer ? LOCAL_SERVER_LIMIT_MB : CLOUD_DOWNLOAD_LIMIT_MB,
+    maxInputMb: localServer ? MAX_UPLOAD_MB : CLOUD_DOWNLOAD_LIMIT_MB,
     allowedUserIds: parseUserIds(env("ALLOWED_USER_IDS")),
     inlineMaxInputMb: 25,
     inlineMaxSeconds: 50,
@@ -292,7 +294,7 @@ function applyOverride(values: RuntimeSettings, key: OverridableKey, value: stri
       values.preset = value as RuntimeSettings["preset"];
       break;
     case "max_input_mb":
-      values.maxInputMb = Number(value);
+      values.maxInputMb = Math.min(Number(value), MAX_UPLOAD_MB);
       break;
     case "allowed_user_ids":
       values.allowedUserIds = parseUserIds(String(value));

@@ -155,7 +155,7 @@ Telegram's public bot server limits what a bot can handle:
 
 | | Public Telegram server (default) | Local Bot API server (`--local`) |
 |---|---|---|
-| Videos the bot can receive | up to **20 MB** | no Telegram limit (the bot allows 2000 MB by default, see `MAX_INPUT_MB`) |
+| Videos the bot can receive | up to **20 MB** | no Telegram limit (the bot allows 1000 MB by default, capped at 1 GB, see `MAX_INPUT_MB`) |
 | Files the bot can send | up to **50 MB** | up to **2000 MB** |
 
 Most iPhone clips are bigger than 20 MB, so for real use you need the local server. It is Telegram's open-source Bot API server, run on the same Mac as the bot. The bot then copies the video from the server's disk instead of downloading it over the network.
@@ -198,7 +198,7 @@ environment, so you can retune without a redeploy.
 | `ALLOWED_USER_IDS` | *(empty: anyone)* | Comma-separated Telegram user IDs allowed to use the bot. |
 | `CRF` | `20` | Quality, 0 to 51. Lower is closer to the original and bigger. 18 to 22 is the useful range. |
 | `X265_PRESET` | `medium` | Encoder speed. Slower presets give slightly smaller files and take much longer. |
-| `MAX_INPUT_MB` | `20`, or `2000` in local mode | Largest video the bot accepts. |
+| `MAX_INPUT_MB` | `20`, or `1000` in local mode | Largest video the bot accepts. Capped at 1000 MB (1 GB) even if set higher. |
 | `MAX_CONCURRENT_JOBS` | `1` | Conversions running at once. Others wait in a queue. |
 | `FFMPEG_TIMEOUT_SECONDS` | `7200` | Stop a conversion that runs longer than this. |
 | `FFMPEG_BIN`, `FFPROBE_BIN` | `ffmpeg`, `ffprobe` | Paths to the binaries, if they are not on `PATH`. |

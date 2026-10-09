@@ -15,6 +15,8 @@ CLOUD_DOWNLOAD_LIMIT_MB = 20  # bots can only download files up to 20 MB
 CLOUD_UPLOAD_LIMIT_MB = 50  # bots can upload files up to 50 MB
 # A self-hosted Bot API server (github.com/tdlib/telegram-bot-api) raises both to 2000 MB.
 LOCAL_SERVER_LIMIT_MB = 2000
+# Hard cap on any uploaded video, whatever MAX_INPUT_MB says: 1 GB.
+MAX_UPLOAD_MB = 1000
 
 MB = 1_000_000  # decimal megabytes, the same units iPhone and Telegram show users
 
@@ -62,7 +64,7 @@ class Settings:
 
     @property
     def max_input_bytes(self) -> int:
-        return self.max_input_mb * MB
+        return min(self.max_input_mb, MAX_UPLOAD_MB) * MB
 
     @property
     def upload_limit_bytes(self) -> int:
@@ -149,7 +151,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         raise ConfigError(f"LOG_LEVEL must be one of: {', '.join(LOG_LEVELS)}")
 
     # Download limit: unlimited only in --local mode; otherwise Telegram's 20 MB cap applies.
-    default_max_input = LOCAL_SERVER_LIMIT_MB if local_mode else CLOUD_DOWNLOAD_LIMIT_MB
+    default_max_input = MAX_UPLOAD_MB if local_mode else CLOUD_DOWNLOAD_LIMIT_MB
 
     return Settings(
         bot_token=token,
@@ -158,7 +160,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         allowed_user_ids=_user_ids(env, "ALLOWED_USER_IDS"),
         crf=_int(env, "CRF", 20, minimum=0, maximum=51),
         preset=preset,
-        max_input_mb=_int(env, "MAX_INPUT_MB", default_max_input, minimum=1, maximum=LOCAL_SERVER_LIMIT_MB),
+        max_input_mb=_int(env, "MAX_INPUT_MB", default_max_input, minimum=1, maximum=MAX_UPLOAD_MB),
         max_concurrent_jobs=_int(env, "MAX_CONCURRENT_JOBS", 1, minimum=1, maximum=16),
         ffmpeg_timeout_seconds=_int(env, "FFMPEG_TIMEOUT_SECONDS", 7200, minimum=60, maximum=86400),
         ffmpeg_bin=_text(env, "FFMPEG_BIN", "ffmpeg"),

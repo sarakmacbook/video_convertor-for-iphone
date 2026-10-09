@@ -3,7 +3,9 @@ import pytest
 from video_convertor_bot.config import (
     CLOUD_DOWNLOAD_LIMIT_MB,
     LOCAL_SERVER_LIMIT_MB,
+    MAX_UPLOAD_MB,
     ConfigError,
+    Settings,
     load_settings,
 )
 
@@ -65,8 +67,18 @@ def test_local_server_raises_the_limits():
     assert s.api_url == "http://127.0.0.1:8081"  # trailing slash removed
     assert s.local_mode is True
     assert s.uses_local_server is True
-    assert s.max_input_mb == LOCAL_SERVER_LIMIT_MB
+    assert s.max_input_mb == MAX_UPLOAD_MB == 1000
     assert s.upload_limit_bytes == LOCAL_SERVER_LIMIT_MB * 1_000_000
+
+
+def test_max_input_cannot_exceed_one_gigabyte():
+    local = env(TELEGRAM_API_URL="http://127.0.0.1:8081", TELEGRAM_LOCAL_MODE="true")
+    assert load_settings({**local, "MAX_INPUT_MB": "1000"}).max_input_mb == 1000
+    with pytest.raises(ConfigError):
+        load_settings({**local, "MAX_INPUT_MB": "1001"})
+    # A Settings object built directly with a larger value still never accepts more than 1 GB.
+    s = Settings(bot_token=TOKEN, max_input_mb=2000)
+    assert s.max_input_bytes == MAX_UPLOAD_MB * 1_000_000
 
 
 def test_local_server_without_local_mode_keeps_the_download_cap():
