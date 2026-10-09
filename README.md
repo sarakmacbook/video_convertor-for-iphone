@@ -58,7 +58,7 @@ URLs per provider, S3 CORS, ffmpeg on Vercel, the Telegram webhook, workers and 
 
 `docker compose up --build` runs the app with SQLite, local storage and a Python worker.
 
-The Telegram bot still works exactly as described in this README. Webhook mode and polling mode
+The Telegram bot still works exactly as described in this README. In the web app, **Settings → Connect your bot** takes the bot API key and your user ID, checks the key, and sets the webhook. Webhook mode and polling mode
 are mutually exclusive — Telegram delivers updates to one place — so when the web app owns the
 webhook, run `python -m worker` instead of `python -m video_convertor_bot`.
 
@@ -129,7 +129,13 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Open `.env` and set `BOT_TOKEN` to the token from BotFather.
+Connect the bot. This asks for the token from BotFather (typed without being shown) and your Telegram user ID, checks the token with Telegram, writes `BOT_TOKEN` and `ALLOWED_USER_IDS` into `.env`, and sends you a confirmation message:
+
+```bash
+python -m video_convertor_bot connect
+```
+
+Ask **@userinfobot** on Telegram for your user ID. Press **Start** in your bot's chat first, or the confirmation cannot be delivered. You can also edit `.env` by hand: set `BOT_TOKEN` to the token from BotFather.
 
 ### 4. Run it
 
