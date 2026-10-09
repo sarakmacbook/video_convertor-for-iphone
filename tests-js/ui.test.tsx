@@ -335,6 +335,56 @@ describe("the settings page", () => {
     expect(await screen.findByText(/Saved 1 setting\(s\)\./)).toBeTruthy();
   });
 
+  it("connects the bot with its API key and user ID, then sets the webhook", async () => {
+    const connects: unknown[] = [];
+    const hooks: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : String(input);
+        const method = init?.method ?? "GET";
+        if (url === "/api/config" && method === "GET") return jsonResponse(config);
+        if (url === "/api/health") return jsonResponse(health);
+        if (url === "/api/telegram/connect" && method === "POST") {
+          connects.push(JSON.parse(String(init?.body)));
+          return jsonResponse({
+            ok: true,
+            bot: { id: 1, username: "my_convertor_bot", name: "Converter" },
+            userId: 555,
+            messageSent: true,
+            warning: null,
+          });
+        }
+        if (url === "/api/telegram/setup" && method === "POST") {
+          hooks.push(JSON.parse(String(init?.body)));
+          return jsonResponse({ ok: true, url: "https://example.vercel.app/api/telegram/webhook/s", webhook: { url: "https://example.vercel.app/api/telegram/webhook/s" } });
+        }
+        throw new Error(`unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<SettingsForm />);
+    await screen.findByText("postgres");
+
+    const button = screen.getByRole("button", { name: "Connect bot" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true); // nothing to connect yet
+
+    const token = screen.getByLabelText(/Bot API key/) as HTMLInputElement;
+    expect(token.type).toBe("password"); // the key is hidden on screen
+    fireEvent.change(token, { target: { value: "123456789:AAHsecret" } });
+    fireEvent.change(screen.getByLabelText(/Your Telegram user ID/), { target: { value: "555" } });
+    expect(button.disabled).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(button);
+    });
+
+    expect(await screen.findByText(/Connected @my_convertor_bot for user 555\. The webhook is set\./)).toBeTruthy();
+    expect(connects).toEqual([{ token: "123456789:AAHsecret", userId: "555" }]);
+    expect(hooks).toEqual([expect.objectContaining({ action: "set" })]);
+    expect(token.value).toBe(""); // the key is not kept in the page after it is saved
+  });
+
   it("asks for the password when the deployment is protected", async () => {
     vi.stubGlobal(
       "fetch",

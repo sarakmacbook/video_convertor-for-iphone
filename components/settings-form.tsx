@@ -88,6 +88,8 @@ export function SettingsForm() {
   const [busy, setBusy] = useState<string | null>(null);
   const [testChatId, setTestChatId] = useState("");
   const [publicUrl, setPublicUrl] = useState("");
+  const [connectToken, setConnectToken] = useState("");
+  const [connectUserId, setConnectUserId] = useState("");
   const [needsLogin, setNeedsLogin] = useState(false);
   const [password, setPassword] = useState("");
 
@@ -203,6 +205,50 @@ export function SettingsForm() {
     },
     [publicUrl, load],
   );
+
+  const connect = useCallback(async () => {
+    setBusy("connect");
+    try {
+      const response = await fetch("/api/telegram/connect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: connectToken, userId: connectUserId }),
+      });
+      const body = (await response.json()) as {
+        ok: boolean;
+        error?: string;
+        bot?: { username: string | null; name: string | null };
+        warning?: string | null;
+      };
+      if (!body.ok) {
+        setMessage({ tone: "bad", text: body.error ?? "could not connect the bot" });
+        return;
+      }
+      // The key is saved: forget it in the page, then point Telegram at this deployment.
+      setConnectToken("");
+      const botName = body.bot?.username ? `@${body.bot.username}` : "the bot";
+      const hookResponse = await fetch("/api/telegram/setup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "set", publicUrl: publicUrl || undefined }),
+      });
+      const hook = (await hookResponse.json()) as { ok: boolean; error?: string };
+      if (!hook.ok) {
+        setMessage({
+          tone: "warn",
+          text: `Connected ${botName}, but the webhook was not set: ${hook.error ?? "unknown error"}. Fix the public URL below and press Set the webhook.`,
+        });
+      } else {
+        setMessage({
+          tone: body.warning ? "warn" : "good",
+          text: `Connected ${botName} for user ${connectUserId}. The webhook is set.${body.warning ? ` ${body.warning}` : ""}`,
+        });
+      }
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  }, [connectToken, connectUserId, publicUrl, load]);
 
   if (needsLogin) {
     return (
@@ -445,6 +491,59 @@ export function SettingsForm() {
         </div>
         <div className="grid two">
           {ENCODING_KEYS.map((key) => field(key))}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-title">
+          <h2>Connect your bot</h2>
+          <div className="spacer" />
+          <span className={`pill ${health?.telegram.configured ? "good" : "warn"}`}>
+            <span className="dot" /> {health?.telegram.configured ? "connected" : "not connected"}
+          </span>
+        </div>
+        <p className="dim" style={{ marginTop: 0 }}>
+          Paste the bot API key from @BotFather and your Telegram user ID. The key is checked with Telegram, saved, and
+          the webhook is set. Only that user will be allowed to use the bot. Open your bot in Telegram and press Start
+          first, or the confirmation message cannot be delivered.
+        </p>
+        <div className="grid two">
+          <div className="field">
+            <label htmlFor="connect-token">Bot API key</label>
+            <input
+              id="connect-token"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={connectToken}
+              onChange={(event) => setConnectToken(event.target.value)}
+              placeholder="123456789:AAH…"
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="connect-user-id">Your Telegram user ID</label>
+            <input
+              id="connect-user-id"
+              type="text"
+              inputMode="numeric"
+              autoComplete="off"
+              value={connectUserId}
+              onChange={(event) => setConnectUserId(event.target.value)}
+              placeholder="123456789"
+            />
+            <div className="help">
+              Ask @userinfobot on Telegram for your ID. Connecting replaces the allowed user IDs below with this one.
+            </div>
+          </div>
+        </div>
+        <div className="btn-row">
+          <button
+            className="btn primary small"
+            onClick={() => void connect()}
+            disabled={busy === "connect" || !connectToken.trim() || !connectUserId.trim()}
+          >
+            {busy === "connect" ? "Connecting…" : "Connect bot"}
+          </button>
         </div>
       </div>
 
