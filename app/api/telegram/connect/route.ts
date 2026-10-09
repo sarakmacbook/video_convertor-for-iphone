@@ -15,7 +15,7 @@ import { fail, handleRouteError, isAuthorized, json, readJson, unauthorized } fr
 import { getSettings, invalidateSettingsCache } from "@/lib/settings";
 import { writeOverride } from "@/lib/settings/store";
 import { TelegramClient, TelegramError } from "@/lib/telegram/api";
-import { parseBotToken, parseUserId } from "@/lib/telegram/connect";
+import { isRejectedApiKey, parseBotToken, parseUserId } from "@/lib/telegram/connect";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,10 +61,13 @@ export async function POST(request: Request) {
     try {
       bot = await client.getMe();
     } catch (error) {
-      if (error instanceof TelegramError && error.status === 401) {
+      // Telegram (and local Bot API servers) reject a bad key as 401, 404, or HTTP 200
+      // with `{ ok: false, error_code: 401 }`. All of those mean the key is wrong, not
+      // that Telegram is unreachable.
+      if (error instanceof TelegramError && (error.unauthorized || isRejectedApiKey(error.errorCode, error.description))) {
         return fail("Telegram did not accept this API key. Check it in @BotFather (/token) and try again.", 400);
       }
-      const reason = error instanceof TelegramError ? error.description : "unknown error";
+      const reason = error instanceof TelegramError ? error.description : "network error";
       return fail(`could not reach Telegram to check the key: ${reason}`, 502);
     }
 

@@ -10,6 +10,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { parseBotToken, parseUserId } from "@/lib/telegram/connect";
+
 interface SettingEntry {
   value: string;
   source: "database" | "environment" | "default";
@@ -207,12 +209,28 @@ export function SettingsForm() {
   );
 
   const connect = useCallback(async () => {
+    const token = parseBotToken(connectToken);
+    if (!token) {
+      setMessage({
+        tone: "bad",
+        text: "the bot API key looks wrong. Copy the whole token from @BotFather, e.g. 123456789:AAH…",
+      });
+      return;
+    }
+    const userId = parseUserId(connectUserId);
+    if (userId === null) {
+      setMessage({
+        tone: "bad",
+        text: "the user ID must be a whole number, e.g. 123456789. Ask @userinfobot for yours.",
+      });
+      return;
+    }
     setBusy("connect");
     try {
       const response = await fetch("/api/telegram/connect", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: connectToken, userId: connectUserId }),
+        body: JSON.stringify({ token, userId }),
       });
       const body = (await response.json()) as {
         ok: boolean;
@@ -241,7 +259,7 @@ export function SettingsForm() {
       } else {
         setMessage({
           tone: body.warning ? "warn" : "good",
-          text: `Connected ${botName} for user ${connectUserId}. The webhook is set.${body.warning ? ` ${body.warning}` : ""}`,
+          text: `Connected ${botName} for user ${userId}. The webhook is set.${body.warning ? ` ${body.warning}` : ""}`,
         });
       }
       await load();
@@ -310,8 +328,10 @@ export function SettingsForm() {
           <input
             id={`setting-${key}`}
             type={entry.isSecret ? "password" : "text"}
-            value={value}
-            placeholder={entry.isSecret ? "not set" : ""}
+            autoComplete={entry.isSecret ? "new-password" : undefined}
+            spellCheck={false}
+            value={entry.isSecret && draft[key] === undefined ? "" : value}
+            placeholder={entry.isSecret ? (entry.value ? "saved — type a new key to replace it" : "not set") : ""}
             onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))}
           />
         )}
@@ -503,20 +523,29 @@ export function SettingsForm() {
           </span>
         </div>
         <p className="dim" style={{ marginTop: 0 }}>
-          Paste the bot API key from @BotFather and your Telegram user ID. The key is checked with Telegram, saved, and
-          the webhook is set. Only that user will be allowed to use the bot. Open your bot in Telegram and press Start
-          first, or the confirmation message cannot be delivered.
+          Paste the bot API key from @BotFather (the whole message is fine) and your Telegram user ID. The key is
+          checked with Telegram, saved, and the webhook is set. Only that user will be allowed to use the bot. Open
+          your bot in Telegram and press Start first, or the confirmation message cannot be delivered.
         </p>
         <div className="grid two">
           <div className="field">
             <label htmlFor="connect-token">Bot API key</label>
             <input
               id="connect-token"
+              name="telegram-bot-api-key"
               type="password"
-              autoComplete="off"
+              autoComplete="new-password"
               spellCheck={false}
               value={connectToken}
               onChange={(event) => setConnectToken(event.target.value)}
+              onPaste={(event) => {
+                const text = event.clipboardData.getData("text");
+                const token = parseBotToken(text);
+                if (token && token !== text.trim()) {
+                  event.preventDefault();
+                  setConnectToken(token);
+                }
+              }}
               placeholder="123456789:AAH…"
             />
           </div>
@@ -529,6 +558,14 @@ export function SettingsForm() {
               autoComplete="off"
               value={connectUserId}
               onChange={(event) => setConnectUserId(event.target.value)}
+              onPaste={(event) => {
+                const text = event.clipboardData.getData("text");
+                const id = parseUserId(text);
+                if (id !== null && String(id) !== text.trim()) {
+                  event.preventDefault();
+                  setConnectUserId(String(id));
+                }
+              }}
               placeholder="123456789"
             />
             <div className="help">
@@ -541,6 +578,13 @@ export function SettingsForm() {
             className="btn primary small"
             onClick={() => void connect()}
             disabled={busy === "connect" || !connectToken.trim() || !connectUserId.trim()}
+            title={
+              !connectToken.trim()
+                ? "Paste the bot API key first"
+                : !connectUserId.trim()
+                  ? "Paste your Telegram user ID too"
+                  : undefined
+            }
           >
             {busy === "connect" ? "Connecting…" : "Connect bot"}
           </button>

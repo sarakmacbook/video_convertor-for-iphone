@@ -33,6 +33,7 @@ X265_PRESETS = (
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 _TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]+$")
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200d\ufeff\u00a0]")
 
 
 class ConfigError(ValueError):
@@ -121,7 +122,9 @@ def _user_ids(env: Mapping[str, str], key: str) -> frozenset[int]:
 
 def load_settings(env: Mapping[str, str]) -> Settings:
     """Build and validate Settings from an environment-like mapping."""
-    token = _text(env, "BOT_TOKEN")
+    token = _INVISIBLE_RE.sub("", _text(env, "BOT_TOKEN"))
+    if token.lower().startswith("bot") and _TOKEN_RE.match(token[3:]):
+        token = token[3:]
     if not token:
         raise ConfigError("BOT_TOKEN is not set. Create a bot with @BotFather and put its token in .env")
     if not _TOKEN_RE.match(token):

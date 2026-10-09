@@ -13,10 +13,18 @@ import { DEFAULT_API_URL } from "@/lib/settings/schema";
 export class TelegramError extends Error {
   readonly status: number;
   readonly description: string;
-  constructor(description: string, status = 0) {
+  /** Telegram's `error_code` when present; otherwise the HTTP status. */
+  readonly errorCode: number;
+  constructor(description: string, status = 0, errorCode?: number) {
     super(description);
     this.description = description;
     this.status = status;
+    this.errorCode = errorCode ?? status;
+  }
+
+  /** Telegram refused the bot token. The HTTP status is often 401, but not always. */
+  get unauthorized(): boolean {
+    return this.errorCode === 401 || this.errorCode === 404 || /unauthorized/i.test(this.description);
   }
 }
 
@@ -34,6 +42,16 @@ export interface TelegramClientOptions {
   apiUrl?: string;
   localMode?: boolean;
 }
+
+const REQUEST_TIMEOUT_MS = 15_000;
+
+type TelegramPayload<T> = {
+  ok?: boolean;
+  result?: T;
+  description?: string;
+  error_code?: number;
+  parameters?: { retry_after?: number };
+};
 
 export class TelegramClient {
   readonly token: string;
@@ -55,26 +73,50 @@ export class TelegramClient {
     return `${this.apiUrl}/file/bot${this.token}/${filePath.replace(/^\/+/, "")}`;
   }
 
-  async call<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    const response = await fetch(this.#methodUrl(method), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(params),
-      cache: "no-store",
-    });
-    const payload = (await response.json().catch(() => ({}))) as {
-      ok?: boolean;
-      result?: T;
-      description?: string;
-      parameters?: { retry_after?: number };
-    };
-    if (!payload.ok) {
-      const retryAfter = payload.parameters?.retry_after;
-      const description = payload.description ?? `HTTP ${response.status}`;
-      // Rate limits are normal when editing progress messages; callers decide what to do.
-      log.debug(`Telegram ${method} failed: ${description}${retryAfter ? ` (retry after ${retryAfter}s)` : ""}`);
-      throw new TelegramError(description, response.status);
+  /**
+   * Talk to Telegram. The token lives in the URL, so network errors are rewritten without it.
+   * Empty-parameter calls use GET: some proxies and local Bot API servers mishandle POST `{}`.
+   */
+  async #request(url: string, init: RequestInit): Promise<Response> {
+    try {
+      return await fetch(url, {
+        ...init,
+        cache: "no-store",
+        signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      const name = error instanceof Error ? error.name : "";
+      if (name === "TimeoutError" || name === "AbortError") {
+        throw new TelegramError(`Telegram did not answer in time (${this.apiUrl})`, 0, 0);
+      }
+      // Never include error.message: Node's fetch puts the request URL (and the token) in it.
+      throw new TelegramError(`could not reach Telegram at ${this.apiUrl}`, 0, 0);
     }
+  }
+
+  #failure<T>(payload: TelegramPayload<T>, httpStatus: number, method: string): TelegramError {
+    const errorCode = Number(payload.error_code) || httpStatus;
+    const description = payload.description ?? (httpStatus ? `HTTP ${httpStatus}` : "Telegram request failed");
+    const retryAfter = payload.parameters?.retry_after;
+    log.debug(`Telegram ${method} failed: ${description}${retryAfter ? ` (retry after ${retryAfter}s)` : ""}`);
+    return new TelegramError(description, httpStatus, errorCode);
+  }
+
+  async call<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    const url = this.#methodUrl(method);
+    const hasParams = Object.keys(params).length > 0;
+    const response = await this.#request(
+      url,
+      hasParams
+        ? {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(params),
+          }
+        : { method: "GET" },
+    );
+    const payload = (await response.json().catch(() => ({}))) as TelegramPayload<T>;
+    if (!payload.ok) throw this.#failure(payload, response.status, method);
     return payload.result as T;
   }
 
@@ -94,15 +136,9 @@ export class TelegramClient {
     const blob = await openAsBlob(filePath, contentType ? { type: contentType } : undefined);
     form.set(fileField, blob, filePath.split("/").pop() ?? "video.mp4");
 
-    const response = await fetch(this.#methodUrl(method), { method: "POST", body: form });
-    const payload = (await response.json().catch(() => ({}))) as {
-      ok?: boolean;
-      result?: T;
-      description?: string;
-    };
-    if (!payload.ok) {
-      throw new TelegramError(payload.description ?? `HTTP ${response.status}`, response.status);
-    }
+    const response = await this.#request(this.#methodUrl(method), { method: "POST", body: form });
+    const payload = (await response.json().catch(() => ({}))) as TelegramPayload<T>;
+    if (!payload.ok) throw this.#failure(payload, response.status, method);
     return payload.result as T;
   }
 
