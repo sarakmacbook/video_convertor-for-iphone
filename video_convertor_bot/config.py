@@ -15,8 +15,10 @@ CLOUD_DOWNLOAD_LIMIT_MB = 20  # bots can only download files up to 20 MB
 CLOUD_UPLOAD_LIMIT_MB = 50  # bots can upload files up to 50 MB
 # A self-hosted Bot API server (github.com/tdlib/telegram-bot-api) raises both to 2000 MB.
 LOCAL_SERVER_LIMIT_MB = 2000
-# Hard cap on any uploaded video, whatever MAX_INPUT_MB says: 1 GB.
-MAX_UPLOAD_MB = 1000
+# Default accepted input size in local mode; MAX_INPUT_MB can raise it up to the server limit.
+DEFAULT_LOCAL_INPUT_MB = 1000
+# Hard cap on accepted input size, matching the local Bot API's maximum file size.
+MAX_UPLOAD_MB = LOCAL_SERVER_LIMIT_MB
 
 MB = 1_000_000  # decimal megabytes, the same units iPhone and Telegram show users
 
@@ -150,8 +152,8 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     if log_level not in LOG_LEVELS:
         raise ConfigError(f"LOG_LEVEL must be one of: {', '.join(LOG_LEVELS)}")
 
-    # Download limit: unlimited only in --local mode; otherwise Telegram's 20 MB cap applies.
-    default_max_input = MAX_UPLOAD_MB if local_mode else CLOUD_DOWNLOAD_LIMIT_MB
+    # Larger downloads need a local Bot API server; its configured input cap defaults to 1 GB.
+    default_max_input = DEFAULT_LOCAL_INPUT_MB if local_mode else CLOUD_DOWNLOAD_LIMIT_MB
 
     return Settings(
         bot_token=token,

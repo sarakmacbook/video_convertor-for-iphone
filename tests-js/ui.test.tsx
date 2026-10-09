@@ -281,6 +281,7 @@ describe("the settings page", () => {
     envProblems: [],
     databaseConfigured: true,
     storageDriver: "blob",
+    limits: { maxUploadMb: 2000 },
     effective: { crf: 20, preset: "medium", maxInputMb: 20 },
   };
 
@@ -305,7 +306,7 @@ describe("the settings page", () => {
         if (url === "/api/health") return jsonResponse(health);
         if (url === "/api/config" && method === "PATCH") {
           patches.push(JSON.parse(String(init?.body)));
-          return jsonResponse({ ok: true, saved: { crf: "24" }, settings: config.settings });
+          return jsonResponse({ ok: true, saved: { crf: "24", max_input_mb: "1500" }, settings: config.settings });
         }
         throw new Error(`unexpected request: ${method} ${url}`);
       }),
@@ -321,6 +322,12 @@ describe("the settings page", () => {
     expect(screen.getByText(/ffmpeg version 7\.0\.2/)).toBeTruthy();
     expect(screen.getByText("mac-mini — idle (3 done)")).toBeTruthy();
 
+    const uploadLimit = (await screen.findByLabelText(/Largest accepted video/)) as HTMLInputElement;
+    expect(uploadLimit.type).toBe("number");
+    expect(uploadLimit.max).toBe("2000");
+    expect(screen.getByText(/Maximum supported size: 2000 MB/)).toBeTruthy();
+    fireEvent.change(uploadLimit, { target: { value: "1500" } });
+
     const crf = (await screen.findByLabelText(/Quality \(CRF\)/)) as HTMLInputElement;
     expect(crf.value).toBe("20");
     fireEvent.change(crf, { target: { value: "24" } });
@@ -331,8 +338,8 @@ describe("the settings page", () => {
     });
 
     await waitFor(() => expect(patches.length).toBe(1));
-    expect(patches[0]).toMatchObject({ values: { crf: "24" } });
-    expect(await screen.findByText(/Saved 1 setting\(s\)\./)).toBeTruthy();
+    expect(patches[0]).toMatchObject({ values: { crf: "24", max_input_mb: "1500" } });
+    expect(await screen.findByText(/Saved 2 setting\(s\)\./)).toBeTruthy();
   });
 
   it("connects the bot with its API key and user ID, then sets the webhook", async () => {

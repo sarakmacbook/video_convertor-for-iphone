@@ -7,7 +7,7 @@
  */
 
 import { getSettings, getSettingsView, invalidateSettingsCache } from "@/lib/settings";
-import { coerceOverride, OVERRIDABLE_KEYS, type OverridableKey } from "@/lib/settings/schema";
+import { coerceOverride, MAX_UPLOAD_MB, OVERRIDABLE_KEYS, type OverridableKey } from "@/lib/settings/schema";
 import { deleteOverride, writeOverride } from "@/lib/settings/store";
 import { fail, handleRouteError, isAuthorized, json, readJson, unauthorized } from "@/lib/http";
 import { isDatabaseConfigured } from "@/lib/db";
@@ -23,6 +23,7 @@ export async function GET(request: Request) {
     return json({
       ok: true,
       ...view,
+      limits: { maxUploadMb: MAX_UPLOAD_MB },
       effective: {
         crf: values.crf,
         preset: values.preset,

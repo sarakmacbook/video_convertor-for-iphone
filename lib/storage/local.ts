@@ -114,7 +114,7 @@ export class LocalStorage implements Storage {
     return { size: body.byteLength, contentType: _contentType ?? null };
   }
 
-  /** Streaming write used by the local upload route, so a 1 GB upload does not fill memory. */
+  /** Streaming write used by the local upload route, so large uploads do not fill memory. */
   async putStream(key: string, stream: ReadableStream<Uint8Array>): Promise<ObjectHead> {
     const file = objectPath(this.#root, key);
     await mkdir(path.dirname(file), { recursive: true });

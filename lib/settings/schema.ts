@@ -35,8 +35,10 @@ export const CLOUD_DOWNLOAD_LIMIT_MB = 20;
 export const CLOUD_UPLOAD_LIMIT_MB = 50;
 /** A self-hosted Bot API server (--local) raises both to 2000 MB. */
 export const LOCAL_SERVER_LIMIT_MB = 2000;
-/** Hard cap on any uploaded video, whatever the settings say: 1 GB. */
-export const MAX_UPLOAD_MB = 1000;
+/** Default accepted input size with a local Bot API server. Operators can raise this in Settings. */
+export const DEFAULT_LOCAL_INPUT_MB = 1000;
+/** Hard cap on accepted input size: matches the local Telegram Bot API's 2000 MB file limit. */
+export const MAX_UPLOAD_MB = LOCAL_SERVER_LIMIT_MB;
 export const MB = 1_000_000;
 export const DEFAULT_API_URL = "https://api.telegram.org";
 
@@ -160,7 +162,7 @@ export function defaultSettings(envSettings: EnvSettings = loadEnvSettings()): R
   return {
     crf: 20,
     preset: "medium",
-    maxInputMb: localServer ? MAX_UPLOAD_MB : CLOUD_DOWNLOAD_LIMIT_MB,
+    maxInputMb: localServer ? DEFAULT_LOCAL_INPUT_MB : CLOUD_DOWNLOAD_LIMIT_MB,
     allowedUserIds: parseUserIds(env("ALLOWED_USER_IDS")),
     inlineMaxInputMb: 25,
     inlineMaxSeconds: 50,
