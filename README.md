@@ -48,6 +48,7 @@ Quick start:
 
 ```bash
 npm install
+npm run setup                 # checks FFmpeg/Node requirements, configures .env, runs migrations
 npm run dev                   # http://localhost:3000 (uses local SQLite + storage out of the box)
 ```
 
